@@ -1,217 +1,249 @@
 import re
 import sqlite3
-import asyncio
-from telethon import TelegramClient, events
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from fuzzywuzzy import process
 
-# ================= تنظیمات ربات =================
-API_ID = 6
-API_HASH = 'eb06d4de3521142fa6e3d24247465352'
+# ================= تنظیمات احراز هویت =================
+# تنها با توکن بات‌فادر بدون نیاز به API_ID
 BOT_TOKEN = '8936060141:AAHD7N56eK7FtIq_FBy8E1txGNKkV2lWQjI'
-CHANNEL_USERNAME = 'https://t.me/+L8Svnjw-I_0wMzU0'
-
-client = TelegramClient('mafia_bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
 # ================= دیتابیس =================
 def init_db():
     conn = sqlite3.connect('mafia_stats.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS players (id INTEGER PRIMARY KEY, name TEXT UNIQUE)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS matches (
-                    id INTEGER PRIMARY KEY,
-                    player_id INTEGER,
-                    side TEXT,
-                    is_win BOOLEAN,
-                    FOREIGN KEY(player_id) REFERENCES players(id))''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS players (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE COLLATE NOCASE
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id INTEGER,
+            event_id TEXT,
+            scenario TEXT,
+            side TEXT,
+            is_win INTEGER,
+            UNIQUE(player_id, event_id),
+            FOREIGN KEY(player_id) REFERENCES players(id)
+        )
+    ''')
     conn.commit()
     conn.close()
 
-def get_standard_name(name):
-    conn = sqlite3.connect('mafia_stats.db')
-    c = conn.cursor()
-    c.execute("SELECT name FROM players")
-    existing_names = [row[0] for row in c.fetchall()]
-    conn.close()
-
-    if not existing_names:
-        return name
-
-    # تشخیص هوشمند اسامی مشابه (حساسیت ۸۵ درصد برای چشم‌پوشی از غلط‌های املایی)
-    best_match, score = process.extractOne(name, existing_names)
-    if score >= 85:
-        return best_match
-    return name
-
-def save_player_stats(name, side, is_win):
-    if side == "Independent": # نقش‌های مستقل در آمار حساب نمی‌شوند
-        return
-
-    standard_name = get_standard_name(name)
+def get_or_create_player(cursor, raw_name):
+    clean_name = raw_name.strip().lower()
+    cursor.execute("SELECT id, name FROM players")
+    existing_players = cursor.fetchall()
     
-    conn = sqlite3.connect('mafia_stats.db')
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (standard_name,))
-    c.execute("SELECT id FROM players WHERE name = ?", (standard_name,))
-    player_id = c.fetchone()[0]
-    
-    c.execute("INSERT INTO matches (player_id, side, is_win) VALUES (?, ?, ?)", (player_id, side, is_win))
-    conn.commit()
-    conn.close()
+    if existing_players:
+        names = [p[1] for p in existing_players]
+        best_match, score = process.extractOne(clean_name, names)
+        if score >= 85:
+            for p in existing_players:
+                if p[1] == best_match:
+                    return p[0], p[1]
 
-# ================= منطق نقش‌ها و سناریوها =================
+    cursor.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (clean_name,))
+    cursor.execute("SELECT id FROM players WHERE name = ?", (clean_name,))
+    row = cursor.fetchone()
+    return row[0], clean_name
+
+# ================= منطق تشخیص نقش و سناریو =================
 def detect_side(scenario, role):
-    scenario = scenario.lower()
-    role = role.lower()
-    
-    # 1. مستقل‌ها
+    sc = scenario.lower().strip()
+    ro = role.lower().strip()
+
+    # ۱. نقش‌های مستقل
     independents = ['jack', 'جک', 'nostra', 'نوسترا', 'sherlock', 'شرلوک', 'churchill', 'چرچیل']
-    if any(ind in role for ind in independents):
+    if any(ind in ro for ind in independents):
         return "Independent"
 
-    # 2. مافیاهای پایه و اضافه شونده در بازی‌های 13/15 نفره
-    mafia_roles = ['don', 'دن', 'nato', 'ناتو', 'mafia sade', 'مافیا ساده']
+    # ۲. مافیاهای پایه و اضافه شونده در بازی‌های ۱۲ الی ۱۵ نفره
+    mafia_roles = ['don', 'دن', 'nato', 'ناتو', 'mafia', 'مافیا']
 
-    # 3. مافیاهای اختصاصی هر سناریو
-    if 'takavar' in scenario or 'تکاور' in scenario:
-        mafia_roles.extend(['grogangir', 'گروگانگیر'])
-    elif 'bazpors' in scenario or 'بازپرس' in scenario:
+    # ۳. مافیاهای اختصاصی هر سناریو
+    if any(s in sc for s in ['takavar', 'تکاور']):
+        mafia_roles.extend(['grogangir', 'گروگانگیر', 'گروگان گیر'])
+    elif any(s in sc for s in ['bazpors', 'بازپرس']):
         mafia_roles.extend(['shayad', 'شیاد'])
-    elif 'mozakere' in scenario or 'مذاکره' in scenario:
-        mafia_roles.extend(['mozakere', 'مذاکره کننده', 'خریداری کننده'])
-    elif 'kapo' in scenario or 'کاپو' in scenario:
+    elif any(s in sc for s in ['mozakere', 'مذاکره']):
+        mafia_roles.extend(['mozakere', 'مذاکره کننده', 'خریدار', 'خریداری کننده'])
+    elif any(s in sc for s in ['kapo', 'کاپو']):
         mafia_roles.extend(['jadogar', 'جادوگر', 'jalad', 'جلاد'])
-    elif 'hanibal' in scenario or 'هانیبال' in scenario:
+    elif any(s in sc for s in ['hanibal', 'هانیبال']):
         mafia_roles.extend(['hanibal', 'هانیبال', 'saye', 'سایه'])
-    elif 'namayande' in scenario or 'نماینده' in scenario:
-        mafia_roles.extend(['yaghi', 'یاغی', 'hacker', 'هکر']) 
-        # نقش وکیل اینجا خودکار شهروند حساب می‌شود چون به لیست مافیا اضافه نشد.
-    elif 'pishrafte' in scenario or 'پیشرفته' in scenario:
+    elif any(s in sc for s in ['namayande', 'نماینده']):
+        mafia_roles.extend(['yaghi', 'یاغی', 'hacker', 'هکر'])
+    elif any(s in sc for s in ['pishrafte', 'پیشرفته']):
         mafia_roles.extend(['vakil', 'وکیل', 'terrorist', 'تروریست', 'natasha', 'ناتاشا'])
-    elif any(s in scenario for s in ['nostra', 'نوسترا', 'jack', 'جک', 'sherlock', 'شرلوک', 'پدرخوانده', 'pedarkhande']):
-        mafia_roles.extend(['pedarkhande', 'پدرخوانده', 'matador', 'ماتادور', 'saul goodman', 'سال گودمن', 'سال'])
-    elif 'elclassico' in scenario or 'الکلاسیکو' in scenario:
-        mafia_roles.extend(['khoan', 'خوان', 'blanco', 'بلانکو', 'pablo scobar', 'پابلو اسکوبار', 'پابلو'])
+    elif any(s in sc for s in ['elclassico', 'الکلاسیکو', 'ال کلاسیکو']):
+        mafia_roles.extend(['khoan', 'خوان', 'blanco', 'بلانکو', 'pablo', 'scobar', 'پابلو', 'اسکوبار'])
+    elif any(s in sc for s in ['nostra', 'نوسترا', 'jack', 'جک', 'sherlock', 'شرلوک', 'pedarkhande', 'پدرخوانده', 'پدر خوانده']):
+        mafia_roles.extend(['pedarkhande', 'پدرخوانده', 'پدر خوانده', 'matador', 'ماتادور', 'saul', 'سال گودمن', 'سال'])
 
-    # بررسی تطابق نقش با لیست مافیاها
     for m in mafia_roles:
-        if m in role:
+        if m in ro:
             return "Mafia"
-            
-    # اگر مستقل یا مافیا نباشد، قطعا شهروند است
+
     return "Citizen"
 
-# ================= استخراج اطلاعات از متن =================
-def process_message(text):
+# ================= استخراج اطلاعات بازی =================
+def process_text_data(text, unique_msg_id):
     try:
         scenario_match = re.search(r'𝐒𝐂𝐄𝐍𝐀𝐑𝐈𝐎\s*•\s*(.+)', text)
         win_match = re.search(r'𝐖𝐈𝐍\s*•\s*(.+)', text)
-        
+        event_match = re.search(r'𝐄𝐕𝐄𝐍𝐓\s*•\s*([0-9]+)', text)
+
         if not scenario_match or not win_match:
-            return
-            
+            return False
+
         scenario = scenario_match.group(1).strip()
         win_text = win_match.group(1).strip().lower()
-        
-        # تشخیص ساید برنده
-        winning_side = "Unknown"
-        if 'شهر' in win_text or 'citizen' in win_text:
-            winning_side = "Citizen"
-        elif 'مافیا' in win_text or 'mafia' in win_text:
+        event_id = event_match.group(1).strip() if event_match else str(unique_msg_id)
+
+        winning_side = None
+        if 'مافیا' in win_text or 'mafia' in win_text:
             winning_side = "Mafia"
-            
-        # استخراج بازیکنان (پشتیبانی از نام انگلیسی + نقش فارسی)
-        # الگوی شناسایی خطوطی که با شماره شروع میشوند
-        players_lines = re.findall(r'[✦]*[➊-➓0-9]+:\s*([a-zA-Z0-9_\-\s]+)\s+(.+)', text)
-        
-        for name_part, role_part in players_lines:
-            name = name_part.strip().lower()
-            role = role_part.strip().lower()
-            
-            # گاد بازی محاسبه نمیشود
-            if name == "god":
+        elif any(w in win_text for w in ['شهر', 'citizen', 'کی اس', 'ks']):
+            winning_side = "Citizen"
+
+        if not winning_side or "𝐏𝐋𝐀𝐘𝐄𝐑𝐒" not in text:
+            return False
+
+        players_part = text.split("𝐏𝐋𝐀𝐘𝐄𝐑𝐒")[1]
+        if "𝐖𝐈𝐍" in players_part:
+            players_part = players_part.split("𝐖𝐈𝐍")[0]
+
+        conn = sqlite3.connect('mafia_stats.db')
+        c = conn.cursor()
+
+        for line in players_part.strip().splitlines():
+            line = line.strip()
+            slot_match = re.search(r'[➊-➓0-9۰-۹]+\s*[:\.\-]\s*(.+)', line)
+            if not slot_match:
                 continue
-                
-            player_side = detect_side(scenario, role)
-            is_win = (player_side == winning_side)
-            
-            save_player_stats(name, player_side, is_win)
-            
+
+            content = slot_match.group(1).strip()
+            eng_match = re.search(r'^([a-zA-Z0-9_\-\s]+)', content)
+            if eng_match and len(eng_match.group(1).strip()) > 0:
+                name = eng_match.group(1).strip()
+                role = content[len(eng_match.group(0)):].strip()
+            else:
+                parts = content.split()
+                name = parts[0] if parts else ""
+                role = " ".join(parts[1:]) if len(parts) > 1 else "ساده"
+
+            if not role:
+                tokens = content.split()
+                if len(tokens) > 1:
+                    name = " ".join(tokens[:-1])
+                    role = tokens[-1]
+
+            if not name or name.lower() == 'god':
+                continue
+
+            side = detect_side(scenario, role)
+            if side == "Independent":
+                continue
+
+            is_win = 1 if side == winning_side else 0
+            player_id, _ = get_or_create_player(c, name)
+
+            c.execute('''
+                INSERT OR IGNORE INTO matches (player_id, event_id, scenario, side, is_win)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (player_id, event_id, scenario, side, is_win))
+
+        conn.commit()
+        conn.close()
+        return True
     except Exception as e:
-        print(f"Error parsing message: {e}")
+        print(f"Error processing: {e}")
+        return False
 
-# ================= دستورات ربات =================
+# ================= هندلرهای ربات =================
+async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.channel_post or update.message
+    if msg and msg.text:
+        if "𝐏𝐋𝐀𝐘𝐄𝐑𝐒" in msg.text and "𝐖𝐈𝐍" in msg.text:
+            success = process_text_data(msg.text, msg.message_id)
+            if success:
+                print(f"Event ثبت شد: شناسه {msg.message_id}")
 
-@client.on(events.NewMessage(pattern='/scan_channel'))
-async def scan_channel(event):
-    await event.reply("در حال اسکن کانال و استخراج اطلاعات بازی‌ها. لطفا صبر کنید... ⏳")
-    count = 0
-    async for message in client.iter_messages(CHANNEL_USERNAME):
-        if message.text and "𝐏𝐋𝐀𝐘𝐄𝐑𝐒" in message.text and "𝐖𝐈𝐍" in message.text:
-            process_message(message.text)
-            count += 1
-    await event.reply(f"اسکن با موفقیت انجام شد! اطلاعات {count} بازی استخراج و در دیتابیس ذخیره شد. ✅")
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "سلام! ربات تحلیل آمار مافیا آماده است.\n"
+        "برای دیدن گزارش دستور /report را ارسال کنید."
+    )
 
-@client.on(events.NewMessage(pattern='/report'))
-async def generate_report(event):
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('mafia_stats.db')
     c = conn.cursor()
-    
-    # کوئری بازیکنان با بالای 30 بازی (درصد کلی و درصد هر ساید)
+
+    # فیلتر بازیکنان بالای ۳۰ بازی
     c.execute('''
-        SELECT p.name, 
-               COUNT(m.id) as total_games,
-               SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) * 100 / COUNT(m.id) as overall_win_rate,
-               SUM(CASE WHEN m.side = 'Mafia' THEN 1 ELSE 0 END) as mafia_games,
-               SUM(CASE WHEN m.side = 'Mafia' AND m.is_win = 1 THEN 1 ELSE 0 END) as mafia_wins,
-               SUM(CASE WHEN m.side = 'Citizen' THEN 1 ELSE 0 END) as city_games,
-               SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as city_wins
+        SELECT 
+            p.name,
+            COUNT(m.id) as total_games,
+            (SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(m.id)) as overall_win_rate,
+            SUM(CASE WHEN m.side = 'Mafia' THEN 1 ELSE 0 END) as mafia_games,
+            SUM(CASE WHEN m.side = 'Mafia' AND m.is_win = 1 THEN 1 ELSE 0 END) as mafia_wins,
+            SUM(CASE WHEN m.side = 'Citizen' THEN 1 ELSE 0 END) as citizen_games,
+            SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
         FROM players p
         JOIN matches m ON p.id = m.player_id
         GROUP BY p.id
         HAVING total_games > 30
         ORDER BY overall_win_rate DESC
     ''')
-    top_players = c.fetchall()
-    
-    if not top_players:
-        await event.reply("هنوز بازیکنی با بیش از 30 بازی ثبت نشده است!")
+    results = c.fetchall()
+    conn.close()
+
+    if not results:
+        await update.message.reply_text("هنوز بازیکنی با بیش از ۳۰ بازی ثبت نشده است.")
         return
 
-    report = "🏆 **رتبه‌بندی نهایی (بالای 30 بازی)** 🏆\n\n"
-    
-    mafia_best = []
-    city_best = []
+    report = "📊 **گزارش عملکرد بازیکنان برتر (بالای ۳۰ بازی)**\n\n"
+    mafia_leaders = []
+    citizen_leaders = []
 
-    for rank, p in enumerate(top_players, 1):
-        name, t_games, overall_rate, m_games, m_wins, c_games, c_wins = p
-        
+    for idx, row in enumerate(results, 1):
+        name, total_g, win_rate, m_games, m_wins, c_games, c_wins = row
         m_rate = (m_wins * 100 // m_games) if m_games > 0 else 0
         c_rate = (c_wins * 100 // c_games) if c_games > 0 else 0
-        
-        mafia_best.append((name, m_rate, m_games))
-        city_best.append((name, c_rate, c_games))
-        
-        report += f"🥇 {rank}. {name.title()}\n"
-        report += f"🎮 بازی‌ها: {t_games} | 📈 برد کلی: {overall_rate}%\n"
-        report += f"🔪 درصد برد مافیایی: {m_rate}% | 🛡 درصد برد شهروندی: {c_rate}%\n"
-        report += "┄┄┄┄┄┄┄┄┄┄┄\n"
-        
-    # رتبه‌بندی مجزا برای مافیا و شهروند
-    mafia_best = sorted(mafia_best, key=lambda x: x[1], reverse=True)[:5]
-    city_best = sorted(city_best, key=lambda x: x[1], reverse=True)[:5]
-    
-    report += "\n🔥 **بهترین پلیرها با کارت مافیا:**\n"
-    for i, (name, rate, count) in enumerate(mafia_best, 1):
-        report += f"{i}. {name.title()} ({rate}% برد از {count} بازی)\n"
 
-    report += "\n🛡 **بهترین پلیرها با کارت شهروند:**\n"
-    for i, (name, rate, count) in enumerate(city_best, 1):
-        report += f"{i}. {name.title()} ({rate}% برد از {count} بازی)\n"
+        mafia_leaders.append((name, m_rate, m_games, m_wins))
+        citizen_leaders.append((name, c_rate, c_games, c_wins))
 
-    await event.reply(report)
-    conn.close()
+        report += f"🎖 **رتبه {idx}: {name.title()}**\n"
+        report += f"🎮 مجموع بازی‌ها: {total_g} | 🏆 درصد برد کل: {win_rate:.1f}%\n"
+        report += f"🔪 ساید مافیا: {m_rate}% برد ({m_wins} از {m_games})\n"
+        report += f"🛡 ساید شهروند: {c_rate}% برد ({c_wins} از {c_games})\n"
+        report += "─────────────────────\n"
+
+    mafia_leaders.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    report += "\n🔥 **رتبه‌بندی برترین‌ها با کارت مافیا:**\n"
+    for r, (n, rate, games, wins) in enumerate(mafia_leaders[:5], 1):
+        report += f"{r}. {n.title()} ⟵ {rate}% برد ({wins} برد از {games} بازی)\n"
+
+    citizen_leaders.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    report += "\n🛡 **رتبه‌بندی برترین‌ها با کارت شهروندی:**\n"
+    for r, (n, rate, games, wins) in enumerate(citizen_leaders[:5], 1):
+        report += f"{r}. {n.title()} ⟵ {rate}% برد ({wins} برد از {games} بازی)\n"
+
+    await update.message.reply_text(report, parse_mode="Markdown")
 
 if __name__ == '__main__':
     init_db()
-    print("ربات با موفقیت روشن شد...")
-    client.run_until_disconnected()
+    print("ربات با موفقیت فعال شد و منتظر دریافت پیام‌هاست...")
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("report", report_command))
+    # دریافت و پردازش خودکار پیام‌های ارسال شده در کانال یا پی‌وی
+    app.add_handler(MessageHandler(filters.ALL, channel_post_handler))
+
+    app.run_polling()
