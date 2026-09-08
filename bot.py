@@ -44,21 +44,36 @@ BATCH_TASKS = {}
 TOTAL_PROCESSED_COUNT = 0
 DB_LOCK = asyncio.Lock()
 
+# مراحل مکالمه
 SEARCH_STATE = 1
 LINK_PROFILE_STATE = 2
 ADD_CHANNEL_STATE = 3
 
 SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯"
 
-# اسامی فیلترشده
-EXCLUDED_PLAYERS = {'ali', 'sara', 'mohammad', 'mohamad'}
+# فقط ali و sara نادیده گرفته می‌شوند
+EXCLUDED_PLAYERS = {'ali', 'sara'}
 
-# نگاشت ادغام به نام omid
+# دیکشنری ادغام اسامی
 PLAYER_ALIASES = {
+    # ادغام به omid
     'mohammad a': 'omid',
     'mohamad a': 'omid',
     'mohammad akbar': 'omid',
     'mohamad akbar': 'omid',
+
+    # ادغام به alireza kamali
+    'alireza': 'alireza kamali',
+    'alireza k': 'alireza kamali',
+
+    # ادغام به hossein ss
+    'hossein': 'hossein ss',
+    'hosein': 'hossein ss',
+    'hosein ss': 'hossein ss',
+
+    # ادغام به mmd4030
+    'mohamad': 'mmd4030',
+    'mohammad': 'mmd4030',
 }
 
 def normalize_text(text):
@@ -115,7 +130,7 @@ def extract_roles_from_image(image_bytes):
         print(f"Error during OCR extraction: {e}")
         return {}
 
-# ================= ساختار و ترمیم خودکار دیتابیس =================
+# ================= دیتابیس و مهاجرت ادغام‌ها =================
 def init_db():
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
@@ -128,24 +143,20 @@ def init_db():
         )
     ''')
 
-    # کانال اصلی cafe mafia
     c.execute("INSERT OR IGNORE INTO channels (id, name) VALUES (1, 'cafe mafia')")
     c.execute("SELECT id FROM channels WHERE LOWER(name) = 'cafe mafia'")
     cafe_mafia_id = c.fetchone()[0]
 
-    # بررسی و افزودن ستون channel_id به matches در صورت نبودن
     c.execute("PRAGMA table_info(matches)")
     columns = [row[1] for row in c.fetchall()]
     if columns and 'channel_id' not in columns:
         c.execute("ALTER TABLE matches ADD COLUMN channel_id INTEGER DEFAULT 1")
 
-    # بررسی و افزودن ستون channel_id به processed_games
     c.execute("PRAGMA table_info(processed_games)")
     pg_columns = [row[1] for row in c.fetchall()]
     if pg_columns and 'channel_id' not in pg_columns:
         c.execute("ALTER TABLE processed_games ADD COLUMN channel_id INTEGER DEFAULT 1")
 
-    # ترمیم قطعی: تبدیل تمام رکوردهای NULL قبلی به کانال cafe mafia
     c.execute("UPDATE matches SET channel_id = ? WHERE channel_id IS NULL OR channel_id = 0", (cafe_mafia_id,))
     c.execute("UPDATE processed_games SET channel_id = ? WHERE channel_id IS NULL OR channel_id = 0", (cafe_mafia_id,))
 
@@ -171,18 +182,20 @@ def init_db():
         )
     ''')
 
-    # ادغام اطلاعات در omid
-    c.execute("INSERT OR IGNORE INTO players (name) VALUES ('omid')")
-    c.execute("SELECT id FROM players WHERE LOWER(name) = 'omid'")
-    omid_row = c.fetchone()
-    if omid_row:
-        omid_id = omid_row[0]
-        aliases_to_merge = list(PLAYER_ALIASES.keys())
-        alias_placeholders = ','.join(['?'] * len(aliases_to_merge))
+    # اعمال تجمیع و ادغام خودکار اسامی در دیتابیس
+    target_names = set(PLAYER_ALIASES.values())
+    for target in target_names:
+        c.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (target,))
+        c.execute("SELECT id FROM players WHERE LOWER(name) = ?", (target.lower(),))
+        target_id = c.fetchone()[0]
+
+        aliases = [src for src, dst in PLAYER_ALIASES.items() if dst == target]
+        alias_placeholders = ','.join(['?'] * len(aliases))
+
         c.execute(f'''
             SELECT id FROM players 
-            WHERE LOWER(name) IN ({alias_placeholders})
-        ''', aliases_to_merge)
+            WHERE LOWER(name) IN ({alias_placeholders}) AND id != ?
+        ''', aliases + [target_id])
         alias_players = c.fetchall()
 
         for (a_id,) in alias_players:
@@ -190,11 +203,11 @@ def init_db():
                 UPDATE OR IGNORE matches 
                 SET player_id = ? 
                 WHERE player_id = ?
-            ''', (omid_id, a_id))
+            ''', (target_id, a_id))
             c.execute("DELETE FROM matches WHERE player_id = ?", (a_id,))
             c.execute("DELETE FROM players WHERE id = ?", (a_id,))
 
-    # حذف اسامی فیلتر شده
+    # حذف فقط ali و sara
     placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
     c.execute(f'''
         DELETE FROM matches 
@@ -202,6 +215,7 @@ def init_db():
             SELECT id FROM players WHERE LOWER(name) IN ({placeholders})
         )
     ''', list(EXCLUDED_PLAYERS))
+    
     c.execute(f'''
         DELETE FROM players WHERE LOWER(name) IN ({placeholders})
     ''', list(EXCLUDED_PLAYERS))
@@ -218,7 +232,6 @@ def get_user_channel(c, user_id):
         if ch:
             return ch[0], ch[1]
 
-    # پیش‌فرض مطلق روی cafe mafia
     c.execute("SELECT id, name FROM channels WHERE LOWER(name) = 'cafe mafia'")
     default_ch = c.fetchone()
     if not default_ch:
@@ -299,7 +312,7 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= ثبت نبرد با کانال فعال =================
+# ================= ثبت داده بازی =================
 def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1):
     try:
         norm = normalize_text(raw_text)
@@ -613,14 +626,14 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
         print(f"Error sending batch summary: {e}")
 
 async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Hooman, Ebi)*")
+    await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030)*")
     return SEARCH_STATE
 
 async def link_profile_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔗 **اتصال نام بازیکن در بازی:**\n"
         "نام انگلیسی خود را که در بازی‌ها ثبت می‌شود وارد کنید:\n"
-        "*(مثال: Omid, Hooman, Taha)*"
+        "*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030)*"
     )
     return LINK_PROFILE_STATE
 
@@ -632,7 +645,7 @@ async def link_profile_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         player_name = PLAYER_ALIASES[player_name]
 
     if player_name in EXCLUDED_PLAYERS:
-        await update.message.reply_text("❌ این نام مجاز نمی‌باشد.", reply_markup=get_main_keyboard())
+        await update.message.reply_text("❌ این نام در لیست سیاه آماری قرار دارد.", reply_markup=get_main_keyboard())
         return ConversationHandler.END
 
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
@@ -667,8 +680,7 @@ async def channel_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         mark = " 👈 (انتخاب‌شده)" if cid == active_id else ""
         msg += f"{idx}. `{cname}`{mark}\n"
 
-    msg += "\n⚠️ **نکته:** قبل از ارسال بازی مطمئن شوید کانال مورد نظر فعال است.\n"
-    msg += "برای انتخاب کانال موجود یا ساخت کانال جدید، نام کانال را بفرستید:"
+    msg += "\nبرای انتخاب کانال موجود یا ساخت کانال جدید، نام کانال را بفرستید:"
 
     await update.message.reply_text(msg, parse_mode="Markdown")
     return ADD_CHANNEL_STATE
@@ -696,7 +708,7 @@ async def channel_save_or_switch(update: Update, context: ContextTypes.DEFAULT_T
 
     await update.message.reply_text(
         f"✅ کانال فعال شما به **{new_ch_name}** تغییر یافت.\n"
-        f"تمام بازی‌های جدیدی که بفرستید یا گزارش‌هایی که بگیرید در این کانال لحاظ می‌شوند.",
+        f"تمام بازی‌های جدید و گزارش‌های این کانال در این بخش اعمال می‌شوند.",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
@@ -715,7 +727,7 @@ async def my_profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not row:
         await update.message.reply_text(
             "⚠️ هنوز نام بازی خود را متصل نکرده‌اید!\n"
-            "لطفاً ابتدا روی دکمه **«🔗 اتصال نام بازی من»** بزنید و اسم درون بازی خود را وارد کنید.",
+            "لطفاً ابتدا روی دکمه **«🔗 اتصال نام بازی من»** بزنید و اسم درون بازی خود را ثبت کنید.",
             reply_markup=get_main_keyboard()
         )
         return
@@ -782,9 +794,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
         f"🔹 **پشتیبانی از تفکیک کانال‌ها:**\n"
-        f"تمام داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند. می‌توانید کانال جدید ایجاد یا انتخاب کنید.\n\n"
+        f"داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند و می‌توانید کانال جدید ایجاد یا انتخاب کنید.\n\n"
         f"🔹 **پروفایل شخصی خودکار:**\n"
-        f"با زدن «🔗 اتصال نام بازی من»، یک‌بار اسمتان را ثبت کنید تا با زدن «👤 کارنامه من» آمار اختصاصی‌تان را ببینید.\n\n"
+        f"با زدن «🔗 اتصال نام بازی من»، نام خود را متصل کنید تا با زدن «👤 کارنامه من» آمار اختصاصی‌تان را ببینید.\n\n"
         f"🔹 **الگوریتم بیزی با ضریب ثبات سنگین:**\n"
         f"ثبات در تعداد بازی‌های بالا ارزش‌گذاری می‌شود.\n\n"
         f"🔹 **موتور OCR تطبیق تصویر:**\n"
@@ -814,7 +826,6 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
         
-        # در نظر گرفتن فال‌بک برای channel_id های پیش‌فرض
         c.execute(f'''
             SELECT 
                 AVG(is_win) as global_win_mean,
@@ -853,7 +864,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text(
             f"هنوز در کانال **{ch_name}** بازیکنی به حد نصاب حداقل ۱۸ بازی نرسیده است.\n"
-            f"اگر داده‌های قبلی را می‌خواهید، از منو کانال فعال را روی **cafe mafia** بگذارید.",
+            f"برای مشاهده داده‌های کانال اصلی، کانال فعال را روی **cafe mafia** قرار دهید.",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
@@ -980,7 +991,7 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
         query = PLAYER_ALIASES[query]
 
     if query in EXCLUDED_PLAYERS:
-        await update.message.reply_text(f"❌ بازیکنی با نام «{query}» پیدا نشد.", reply_markup=get_main_keyboard())
+        await update.message.reply_text(f"❌ بازیکنی با نام «{query}» در لیست سیاه آماری قرار دارد.", reply_markup=get_main_keyboard())
         return
 
     async with DB_LOCK:
@@ -1113,7 +1124,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("دیتابیس ترمیم شد و ربات با کانال پیش‌فرض cafe mafia فعال است...")
+    print("ربات با ادغام جدید علیرضا، حسین و محمد (mmd4030) و فیلتر فقط ali و sara فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
