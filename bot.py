@@ -35,10 +35,10 @@ DB_LOCK = asyncio.Lock()
 SEARCH_STATE = 1
 SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯"
 
-# اسامی که به طور کامل فیلتر و حذف می‌شوند
-EXCLUDED_PLAYERS = ['ali', 'sara']
+# اسامی که به طور کامل از سیستم حذف و فیلتر می‌شوند
+EXCLUDED_PLAYERS = {'ali', 'sara', 'mohammad', 'mohamad'}
 
-# نگاشت ادغام اسامی: تمامی این موارد به نام omid ثبت و محاسبه می‌شوند
+# نگاشت ادغام به نام omid
 PLAYER_ALIASES = {
     'mohammad a': 'omid',
     'mohamad a': 'omid',
@@ -101,20 +101,7 @@ def init_db():
         )
     ''')
 
-    # ۱. حذف اسامی فیلتر شده (ali, sara)
-    placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
-    c.execute(f'''
-        DELETE FROM matches 
-        WHERE player_id IN (
-            SELECT id FROM players WHERE LOWER(name) IN ({placeholders})
-        )
-    ''', [p.lower() for p in EXCLUDED_PLAYERS])
-    
-    c.execute(f'''
-        DELETE FROM players WHERE LOWER(name) IN ({placeholders})
-    ''', [p.lower() for p in EXCLUDED_PLAYERS])
-
-    # ۲. ادغام قطعی mohammad a و mohamad akbar در حساب omid
+    # ۱. ادغام داده‌ها در حساب omid
     c.execute("INSERT OR IGNORE INTO players (name) VALUES ('omid')")
     c.execute("SELECT id FROM players WHERE LOWER(name) = 'omid'")
     omid_row = c.fetchone()
@@ -131,7 +118,6 @@ def init_db():
         alias_players = c.fetchall()
         
         for (a_id,) in alias_players:
-            # انتقال بازی‌ها به omid بدون تکرار
             c.execute('''
                 UPDATE OR IGNORE matches 
                 SET player_id = ? 
@@ -140,6 +126,19 @@ def init_db():
             
             c.execute("DELETE FROM matches WHERE player_id = ?", (a_id,))
             c.execute("DELETE FROM players WHERE id = ?", (a_id,))
+
+    # ۲. حذف مطلق داده‌های اسامی فیلتر شده
+    placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
+    c.execute(f'''
+        DELETE FROM matches 
+        WHERE player_id IN (
+            SELECT id FROM players WHERE LOWER(name) IN ({placeholders})
+        )
+    ''', list(EXCLUDED_PLAYERS))
+    
+    c.execute(f'''
+        DELETE FROM players WHERE LOWER(name) IN ({placeholders})
+    ''', list(EXCLUDED_PLAYERS))
 
     conn.commit()
     conn.close()
@@ -153,17 +152,16 @@ def get_or_create_player(cursor, raw_name):
     if not clean_name or len(clean_name) < 2 or clean_name.isdigit() or clean_name == 'god':
         return None, None
 
-    if clean_name in EXCLUDED_PLAYERS:
-        return None, None
-
-    # بررسی و هدایت اسامی مستعار به omid
     if clean_name in PLAYER_ALIASES:
         clean_name = PLAYER_ALIASES[clean_name]
+
+    if clean_name in EXCLUDED_PLAYERS:
+        return None, None
 
     if not re.search(r'[a-zA-Z\u0600-\u06FF]', clean_name):
         return None, None
 
-    cursor.execute("SELECT id, name FROM players")
+    cursor.execute("SELECT id, LOWER(name) FROM players")
     existing_players = cursor.fetchall()
     
     if existing_players:
@@ -177,7 +175,7 @@ def get_or_create_player(cursor, raw_name):
                 return pid, existing_name
 
     cursor.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (clean_name,))
-    cursor.execute("SELECT id FROM players WHERE name = ?", (clean_name,))
+    cursor.execute("SELECT id FROM players WHERE LOWER(name) = ?", (clean_name,))
     row = cursor.fetchone()
     return row[0], clean_name
 
@@ -286,13 +284,15 @@ def process_text_data(raw_text, fallback_id):
             if not name or len(name) < 2 or not re.search(r'[a-zA-Z\u0600-\u06FF]', name):
                 continue
 
-            name_lower = name.lower()
-            if name_lower in EXCLUDED_PLAYERS:
-                continue
+            name_lower = name.strip().lower()
+            name_lower = re.sub(rf'[{SEAT_SYMBOLS}]', '', name_lower)
+            name_lower = " ".join(name_lower.split())
 
-            # اعمال ادغام
             if name_lower in PLAYER_ALIASES:
                 name_lower = PLAYER_ALIASES[name_lower]
+
+            if name_lower in EXCLUDED_PLAYERS:
+                continue
 
             side = detect_side(scenario, role)
             if side != "Independent":
@@ -514,13 +514,15 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
     if not raw_content:
         return
 
-    if raw_content in ["🏆 تالار افتخارات و رتبه‌بندی بیزی (PDF)", "📊 مشاهده رتبه‌بندی بیزی و گزارش (PDF)"]:
+    norm_lower = raw_content.strip().lower()
+
+    if norm_lower in ["🏆 تالار افتخارات و رتبه‌بندی بیزی (pdf)", "📊 مشاهده رتبه‌بندی بیزی و گزارش (pdf)"]:
         await report_command(update, context)
         return
-    elif raw_content in ["🔍 جستجوی کارت بازیکن", "🔍 جستجوی آمار بازیکن"]:
+    elif norm_lower in ["🔍 جستجوی کارت بازیکن", "🔍 جستجوی آمار بازیکن"]:
         await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Hooman, Ebi)*")
         return SEARCH_STATE
-    elif raw_content in ["📜 راهنمای رتبه‌بندی", "❓ راهنما"]:
+    elif norm_lower in ["📜 راهنمای رتبه‌بندی", "❓ راهنما"]:
         await help_command(update, context)
         return
 
@@ -538,12 +540,27 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
 
         BATCH_TASKS[chat_id] = asyncio.create_task(flush_batch(chat_id, context))
 
+# ================= پیام استارت و خوش‌آمدگویی کامل =================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_name = update.effective_user.first_name if update.effective_user else "همراه گرامی"
+    
     welcome_text = (
-        "👑 **به سامانه هوشمند آمار و رتبه‌بندی کافه مافیا خوش آمدید!**\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "این سامانه از **الگوریتم بیزی با ضریب ثبات سنگین** بهره می‌برد تا نبردهای پرتعداد بازیکنان باسابقه ارزش واقعی خود را در جدول نشان دهند.\n\n"
-        "👇 *از گزینه‌های زیر استفاده نمایید:* "
+        f"👑 **درود {user_name} عزیز! به سامانه تحلیل و رتبه‌بندی کافه مافیا خوش آمدید.** 👑\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"این ربات یک دستیار هوشمند، عادلانه و پیشرفته برای ثبت، آنالیز و رتبه‌بندی دقیق آمار بازی‌های مافیا است.\n\n"
+        f"🌟 **ویژگی‌ها و قابلیت‌های اصلی ربات:**\n\n"
+        f"🔹 **الگوریتم بیزی با ضریب ثبات سنگین:**\n"
+        f"برخلاف سیستم‌های سنتی که صرفاً درصد برد خام را می‌سنجند، سیستم ما تعداد کل بازی‌ها را ارزش‌گذاری می‌کند؛ بنابراین بازیکنی با ۱۰۰ یا ۲۰۰ بازی زیر سایه شانس مقطعی بازی‌های کم‌تعداد قرار نمی‌گیرد.\n\n"
+        f"🔹 **ثبت خودکار و آنی ایونت‌ها:**\n"
+        f"کافی است متن یا عکس نبردهای برگزارشده را به ربات فوروارد کنید تا مشخصات بازیکنان، نقش‌ها و ساید برنده ذخیره شوند.\n\n"
+        f"🔹 **پروفایل و شناسنامه بازیکنان:**\n"
+        f"با جستجوی نام هر بازیکن، کارنامه تفکیکی (تعداد بازی، برد، درصد پیروزی و رتبه در کل لیگ) همراه با نمودار نواری اختصاصی صادر می‌شود.\n\n"
+        f"🔹 **گزارش رسمی و صدور PDF:**\n"
+        f"در هر لحظه می‌توانید جدول رده‌بندی کل و تاپ ۵ هر ساید را در قالب فایل مستند PDF دریافت کنید.\n\n"
+        f"⚖️ **قوانین و حد نصاب‌های رتبه‌بندی:**\n"
+        f"▫️ حداقل **۱۸ بازی** برای ورود به تالار افتخارات کل.\n"
+        f"▫️ حداقل **۹ بازی** در هر ساید برای رقابت در ۵ نفر برتر مافیا یا شهروند.\n\n"
+        f"👇 **جهت شروع، از دکمه‌های زیر استفاده کنید:**"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -577,7 +594,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             FROM matches m
             JOIN players p ON p.id = m.player_id
             WHERE LOWER(p.name) NOT IN ({placeholders})
-        ''', [p.lower() for p in EXCLUDED_PLAYERS])
+        ''', list(EXCLUDED_PLAYERS))
         global_stats = c.fetchone()
         
         m_global = global_stats[0] if (global_stats and global_stats[0] is not None) else 0.50
@@ -586,7 +603,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         c.execute(f'''
             SELECT 
-                p.name,
+                LOWER(p.name),
                 COUNT(m.id) as total_games,
                 SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) as total_wins,
                 SUM(CASE WHEN m.side = 'Mafia' THEN 1 ELSE 0 END) as mafia_games,
@@ -596,9 +613,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             FROM players p
             JOIN matches m ON p.id = m.player_id
             WHERE LOWER(p.name) NOT IN ({placeholders})
-            GROUP BY p.id
+            GROUP BY LOWER(p.name)
             HAVING total_games >= 18
-        ''', [p.lower() for p in EXCLUDED_PLAYERS])
+        ''', list(EXCLUDED_PLAYERS))
         rows = c.fetchall()
         conn.close()
 
@@ -729,7 +746,6 @@ async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def search_perform(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip().lower()
     
-    # اعمال ادغام در سرچ: در صورت جستجوی mohammad akbar یا mohammad a، کارنامه omid نشان داده می‌شود
     if query in PLAYER_ALIASES:
         query = PLAYER_ALIASES[query]
 
@@ -746,14 +762,14 @@ async def search_perform(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SELECT AVG(is_win) FROM matches m
             JOIN players p ON p.id = m.player_id
             WHERE LOWER(p.name) NOT IN ({placeholders})
-        ''', [p.lower() for p in EXCLUDED_PLAYERS])
+        ''', list(EXCLUDED_PLAYERS))
         global_avg_row = c.fetchone()
         m_global = global_avg_row[0] if (global_avg_row and global_avg_row[0] is not None) else 0.50
 
         c.execute(f'''
             SELECT 
                 p.id,
-                p.name,
+                LOWER(p.name),
                 COUNT(m.id) as total_games,
                 SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) as total_wins,
                 SUM(CASE WHEN m.side = 'Mafia' THEN 1 ELSE 0 END) as mafia_games,
@@ -763,8 +779,8 @@ async def search_perform(update: Update, context: ContextTypes.DEFAULT_TYPE):
             FROM players p
             JOIN matches m ON p.id = m.player_id
             WHERE LOWER(p.name) NOT IN ({placeholders})
-            GROUP BY p.id
-        ''', [p.lower() for p in EXCLUDED_PLAYERS])
+            GROUP BY LOWER(p.name)
+        ''', list(EXCLUDED_PLAYERS))
         all_players_raw = c.fetchall()
         conn.close()
 
@@ -784,7 +800,7 @@ async def search_perform(update: Update, context: ContextTypes.DEFAULT_TYPE):
         r_win = (tw * 100.0 / tg) if tg > 0 else 0
         all_players_calculated.append({
             'id': pid,
-            'name': name,
+            'name': name.lower(),
             'total_games': tg,
             'total_wins': tw,
             'bayes_score': b_score,
@@ -853,7 +869,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با ادغام mohamad akbar و mohammad a در omid، الگوریتم بیزی با ضریب حجم و قالب لوکس فعال شد...")
+    print("ربات فعال شد...")
     
     custom_request = HTTPXRequest(
         connection_pool_size=100,
