@@ -24,19 +24,16 @@ BATCH_TASKS = {}
 TOTAL_PROCESSED_COUNT = 0
 DB_LOCK = asyncio.Lock()
 
-# پاکسازی عمیق تمام کاراکترهای نامرئی و علائم سیت
+SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯"
+
 def deep_clean_line(text):
     if not text:
         return ""
-    # حذف کاراکترهای مخفی و فرمت‌بندی دوطرفه یونیکد (RTL/LTR و فاصله‌های مجازی)
     invisible_chars = ['\u200b', '\u200c', '\u200d', '\u200e', '\u200f', '\ufeff', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e']
     for ch in invisible_chars:
         text = text.replace(ch, ' ')
     
     text = unicodedata.normalize('NFKD', text)
-    
-    # حذف کامل اعداد دایره‌ای، عددهای ساده، ایموجی‌ها و علامت‌ها از شروع خط تا رسیدن به اولین حرف انگلیسی/فارسی
-    # کاراکترهای یونیکد سیت: ➊-➓ و ❶-⓫ و اعداد 0-9 و ۰-۹
     cleaned = re.sub(r'^[^\w\u0600-\u06FF]*[\d\u2776-\u277F\u2780-\u2793\u2460-\u2473]+[^\w\u0600-\u06FF]*', '', text).strip()
     return cleaned
 
@@ -53,9 +50,12 @@ def init_db():
         )
     ''')
     
+    # ثبت ایونت‌ها و هش متن خام برای بررسی تطابق مو به مو
     c.execute('''
-        CREATE TABLE IF NOT EXISTS processed_games (
-            game_hash TEXT PRIMARY KEY
+        CREATE TABLE IF NOT EXISTS processed_events (
+            event_id TEXT,
+            raw_hash TEXT,
+            PRIMARY KEY (event_id, raw_hash)
         )
     ''')
 
@@ -63,8 +63,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS matches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             player_id INTEGER,
-            game_hash TEXT,
             event_id TEXT,
+            game_hash TEXT,
             scenario TEXT,
             side TEXT,
             is_win INTEGER,
@@ -76,16 +76,14 @@ def init_db():
     conn.close()
 
 def get_or_create_player(cursor, raw_name):
-    # نرمال‌سازی نام
     clean_name = raw_name.strip().lower()
+    clean_name = re.sub(rf'[{SEAT_SYMBOLS}]', '', clean_name)
     clean_name = re.sub(r'[\.\-_:]', ' ', clean_name)
     clean_name = " ".join(clean_name.split())
 
-    # فیلتر اسامی غیرمجاز (ایموجی، اعداد خالی، کمتر از ۲ حرف و گاد)
     if not clean_name or len(clean_name) < 2 or clean_name.isdigit() or clean_name == 'god':
         return None, None
-    
-    # جلوگیری قطعی از ورود کاراکترهای تک‌نمادی سیت
+
     if not re.search(r'[a-zA-Z\u0600-\u06FF]', clean_name):
         return None, None
 
@@ -94,16 +92,11 @@ def get_or_create_player(cursor, raw_name):
     
     if existing_players:
         for pid, existing_name in existing_players:
-            # ۱. تطبیق کامل
             if clean_name == existing_name:
                 return pid, existing_name
             
-            # ۲. تطبیق هوشمند برای رفع اشتباهات تایپی (مانند homan و hooman)
-            # استفاده از نسبت فازی و بررسی فاصله طولی
             ratio = fuzz.ratio(clean_name, existing_name)
             len_diff = abs(len(clean_name) - len(existing_name))
-            
-            # اگر اختلاف فقط ۱ الی ۲ حرف باشد و شباهت بالای ۸۲٪ باشد
             if ratio >= 82 and len_diff <= 2:
                 return pid, existing_name
 
@@ -151,23 +144,31 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= استخراج دقیق اطلاعات =================
+# ================= استخراج و اعتبارسنجی مو به مو =================
 def process_text_data(raw_text, fallback_id):
     try:
-        cleaned_raw = "".join(raw_text.split())
-        exact_game_hash = hashlib.md5(cleaned_raw.encode('utf-8')).hexdigest()
+        # ۱. اولویت اول: استخراج شماره بازی
+        event_match = re.search(r'(?:event|ایونت)\s*[:#•\-_ ]*([0-9]+)', raw_text, re.IGNORECASE)
+        if not event_match:
+            return False
+
+        event_id = event_match.group(1).strip()
+
+        # ۲. محاسبه هش دقیق از کل متن خام (حساس به کوچک‌ترین تغییر در حتی یک حرف)
+        raw_hash = hashlib.sha256(raw_text.encode('utf-8')).hexdigest()
 
         conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
         c = conn.cursor()
 
-        c.execute("SELECT 1 FROM processed_games WHERE game_hash = ?", (exact_game_hash,))
+        # بررسی شرط: آیا این شماره بازی با همین متنِ مو به مو قبلاً ثبت شده؟
+        c.execute("SELECT 1 FROM processed_events WHERE event_id = ? AND raw_hash = ?", (event_id, raw_hash))
         if c.fetchone():
+            # کاملاً کپی برابر اصل است؛ رد می‌شود
             conn.close()
             return False
 
         scenario_match = re.search(r'(?:scenario|سناریو)\s*[:•\-_]\s*([^\n\r]+)', raw_text, re.IGNORECASE)
         win_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_]\s*([^\n\r]+)', raw_text, re.IGNORECASE)
-        event_match = re.search(r'(?:event|ایونت)\s*[:#•\-_ ]*([0-9]+)', raw_text, re.IGNORECASE)
 
         if not scenario_match or not win_match:
             conn.close()
@@ -175,7 +176,6 @@ def process_text_data(raw_text, fallback_id):
 
         scenario = scenario_match.group(1).strip()
         win_text = win_match.group(1).strip().lower()
-        event_id = event_match.group(1).strip() if event_match else str(fallback_id)
 
         winning_side = None
         if any(w in win_text for w in ['مافیا', 'mafia']):
@@ -200,7 +200,6 @@ def process_text_data(raw_text, fallback_id):
             if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯']):
                 continue
 
-            # پاکسازی خط و حذف کاراکترهای سیت و مخفی
             clean_line = deep_clean_line(line)
             if not clean_line:
                 continue
@@ -208,7 +207,6 @@ def process_text_data(raw_text, fallback_id):
             clean_line = re.sub(r'[👈👉].*$', '', clean_line).strip()
             clean_line = re.sub(r'\(.*?\)', '', clean_line).strip()
 
-            # تفکیک نام انگلیسی و نقش فارسی
             lang_split = re.search(r'^([a-zA-Z0-9\.\s_-]+)([\u0600-\u06FF\s].*)$', clean_line)
             if lang_split:
                 name = lang_split.group(1).strip()
@@ -222,7 +220,6 @@ def process_text_data(raw_text, fallback_id):
                     name = clean_line
                     role = "ساده"
 
-            # اعتبارسنجی نام
             if not name or len(name) < 2 or not re.search(r'[a-zA-Z\u0600-\u06FF]', name):
                 continue
 
@@ -235,15 +232,18 @@ def process_text_data(raw_text, fallback_id):
                 continue
 
             is_win = 1 if side == winning_side else 0
+            
+            # ثبت در دیتابیس (اگر تغییری در بازی رخ داده باشد، سطر جدید اضافه یا آپدیت می‌شود)
             c.execute('''
-                INSERT OR IGNORE INTO matches (player_id, game_hash, event_id, scenario, side, is_win)
+                INSERT OR IGNORE INTO matches (player_id, event_id, game_hash, scenario, side, is_win)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (player_id, exact_game_hash, event_id, scenario, side, is_win))
+            ''', (player_id, event_id, raw_hash, scenario, side, is_win))
             
             inserted_any = True
 
         if inserted_any:
-            c.execute("INSERT OR IGNORE INTO processed_games (game_hash) VALUES (?)", (exact_game_hash,))
+            # ثبت شناسه بازی همراه با هش متن مو به مو
+            c.execute("INSERT OR IGNORE INTO processed_events (event_id, raw_hash) VALUES (?, ?)", (event_id, raw_hash))
 
         conn.commit()
         conn.close()
@@ -394,7 +394,7 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM processed_games")
+    c.execute("SELECT COUNT(*) FROM processed_events")
     all_stored_games = c.fetchone()[0]
     conn.close()
 
@@ -403,9 +403,9 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
             chat_id=chat_id,
             text=(
                 f"📥 **گزارش پردازش دسته‌ای:**\n"
-                f"🔹 پیام‌های بررسی‌شده: {len(messages)}\n"
+                f"🔹 کل پیام‌های فوروارد شده: {len(messages)}\n"
                 f"✅ بازی‌های جدید اضافه شده: {added}\n"
-                f"🔁 بازی‌های تکراری رد شده (مو به مو یکسان): {len(messages) - added}\n"
+                f"🔁 بازی‌های تکراری رد شده (کپی برابر اصل): {len(messages) - added}\n"
                 f"📊 مجموع کل بازی‌های ثبت‌شده در دیتابیس: {all_stored_games}"
             ),
             parse_mode="Markdown"
@@ -424,6 +424,7 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
 
     norm_content = raw_content.lower()
     
+    # فیلتر اولیه برای پذیرش پیام
     if any(k in norm_content for k in ['player', 'بازیکن', 'سیت', 'ساده', 'مافیا']) and any(w in norm_content for w in ['win', 'برد', 'شهروند', 'مافیا']):
         chat_id = msg.chat_id
         if chat_id not in BATCH_STORAGE:
@@ -515,7 +516,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با فیلتر دقیق سیت و پاکسازی عمیق یونیکد فعال شد...")
+    print("ربات با بررسی اولویت شماره ایونت و فیلتر کپی برابر اصل فعال شد...")
     
     custom_request = HTTPXRequest(
         connection_pool_size=100,
