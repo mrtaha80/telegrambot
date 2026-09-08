@@ -297,7 +297,16 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     init_db()
     print("ربات فعال شد و آماده دریافت دسته‌ای پیام‌هاست...")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # تنظیم پروکسی داخلی فیلترشکن (پورت پیش‌فرض v2rayN و هیدینفای معمولاً 10808 یا 10809 است)
+    # اگر پورت نرم‌افزار شما فرق می‌کند، فقط عدد را تغییر دهید
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .proxy("socks5://127.0.0.1:10808")
+        .get_updates_proxy("socks5://127.0.0.1:10808")
+        .build()
+    )
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("report", report_command))
