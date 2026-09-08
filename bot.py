@@ -34,22 +34,33 @@ def init_db():
     conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
     c = conn.cursor()
     c.execute('PRAGMA journal_mode=WAL;')
+    
+    # جدول بازیکنان
     c.execute('''
         CREATE TABLE IF NOT EXISTS players (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT UNIQUE COLLATE NOCASE
         )
     ''')
+    
+    # جدول ثبت هش بازی‌ها برای جلوگیری از تکرار مو به مو
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS processed_games (
+            game_hash TEXT PRIMARY KEY
+        )
+    ''')
+
+    # جدول ثبت نتایج سایدها
     c.execute('''
         CREATE TABLE IF NOT EXISTS matches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             player_id INTEGER,
-            game_signature TEXT,
+            game_hash TEXT,
             event_id TEXT,
             scenario TEXT,
             side TEXT,
             is_win INTEGER,
-            UNIQUE(player_id, game_signature),
+            UNIQUE(player_id, game_hash),
             FOREIGN KEY(player_id) REFERENCES players(id)
         )
     ''')
@@ -119,30 +130,35 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= استخراج تفکیک‌شده لاتین/فارسی =================
+# ================= استخراج و اعتبارسنجی پیام =================
 def process_text_data(raw_text, fallback_id):
     try:
+        # ایجاد اثر انگشت دقیق از متن کامل برای فیلتر موارد کاملاً مو به مو
+        cleaned_raw = "".join(raw_text.split())
+        exact_game_hash = hashlib.md5(cleaned_raw.encode('utf-8')).hexdigest()
+
+        conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
+        c = conn.cursor()
+
+        # اگر این پیام عیناً قبلاً ثبت شده باشد، بلافاصله رد می‌شود
+        c.execute("SELECT 1 FROM processed_games WHERE game_hash = ?", (exact_game_hash,))
+        if c.fetchone():
+            conn.close()
+            return False
+
         text = normalize_text(raw_text)
 
         scenario_match = re.search(r'(?:scenario|سناریو)\s*[:•\-_]\s*([^\n\r]+)', text, re.IGNORECASE)
         win_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_]\s*([^\n\r]+)', text, re.IGNORECASE)
         event_match = re.search(r'(?:event|ایونت)\s*[:#•\-_ ]*([0-9]+)', text, re.IGNORECASE)
-        date_match = re.search(r'(?:date|تاریخ|📅)\s*[:•\-_ ]*([0-9/\-]+)', text, re.IGNORECASE)
-        time_match = re.search(r'(?:time|ساعت|🕒|⏳)\s*[:•\-_ ]*([0-9:]+)', text, re.IGNORECASE)
-        god_match = re.search(r'(?:god|گاد)\s*[:•\-_]\s*([^\n\r]+)', text, re.IGNORECASE)
 
         if not scenario_match or not win_match:
+            conn.close()
             return False
 
         scenario = scenario_match.group(1).strip()
         win_text = win_match.group(1).strip().lower()
         event_id = event_match.group(1).strip() if event_match else str(fallback_id)
-        date_str = date_match.group(1).strip() if date_match else ""
-        time_str = time_match.group(1).strip() if time_match else ""
-        god_str = god_match.group(1).strip().lower() if god_match else ""
-
-        sig_raw = f"{event_id}_{scenario}_{date_str}_{time_str}_{god_str}"
-        game_signature = hashlib.md5(sig_raw.encode('utf-8')).hexdigest()
 
         winning_side = None
         if any(w in win_text for w in ['مافیا', 'mafia']):
@@ -151,17 +167,17 @@ def process_text_data(raw_text, fallback_id):
             winning_side = "Citizen"
 
         if not winning_side:
+            conn.close()
             return False
 
         players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|$)', text, re.IGNORECASE)
         if not players_match:
+            conn.close()
             return False
 
         players_block = players_match.group(1)
-        conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
-        c = conn.cursor()
-
         inserted_any = False
+
         for line in players_block.strip().splitlines():
             line = line.strip()
             if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯']):
@@ -174,6 +190,7 @@ def process_text_data(raw_text, fallback_id):
             clean_line = re.sub(r'[👈👉].*$', '', clean_line).strip()
             clean_line = re.sub(r'\(.*?\)', '', clean_line).strip()
 
+            # تفکیک دقیق نام انگلیسی و نقش فارسی
             lang_split = re.search(r'^([a-zA-Z0-9\.\s_-]+)([\u0600-\u06FF\s].*)$', clean_line)
             if lang_split:
                 name = lang_split.group(1).strip()
@@ -200,12 +217,15 @@ def process_text_data(raw_text, fallback_id):
 
             is_win = 1 if side == winning_side else 0
             c.execute('''
-                INSERT OR IGNORE INTO matches (player_id, game_signature, event_id, scenario, side, is_win)
+                INSERT OR IGNORE INTO matches (player_id, game_hash, event_id, scenario, side, is_win)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (player_id, game_signature, event_id, scenario, side, is_win))
+            ''', (player_id, exact_game_hash, event_id, scenario, side, is_win))
             
-            if c.rowcount > 0:
-                inserted_any = True
+            inserted_any = True
+
+        if inserted_any:
+            # ثبت قطعی هش پیام به عنوان بازی بررسی شده
+            c.execute("INSERT OR IGNORE INTO processed_games (game_hash) VALUES (?)", (exact_game_hash,))
 
         conn.commit()
         conn.close()
@@ -215,7 +235,7 @@ def process_text_data(raw_text, fallback_id):
         print(f"Error parsing event: {e}")
         return False
 
-# ================= ساخت PDF حرفه‌ای =================
+# ================= ساخت خروجی PDF =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia_Leaderboard.pdf"):
     doc = SimpleDocTemplate(
         filename,
@@ -231,11 +251,11 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
     title_style = ParagraphStyle(
         'MainTitle',
         parent=styles['Heading1'],
-        fontSize=22,
-        leading=26,
-        textColor=colors.HexColor('#1E293B'),
+        fontSize=20,
+        leading=24,
+        textColor=colors.HexColor('#0F172A'),
         alignment=1,
-        spaceAfter=15
+        spaceAfter=10
     )
     subtitle_style = ParagraphStyle(
         'SubTitle',
@@ -243,22 +263,21 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
         fontSize=11,
         textColor=colors.HexColor('#64748B'),
         alignment=1,
-        spaceAfter=25
+        spaceAfter=20
     )
     section_style = ParagraphStyle(
         'SectionHeading',
         parent=styles['Heading2'],
-        fontSize=14,
-        leading=18,
+        fontSize=13,
+        leading=16,
         textColor=colors.HexColor('#0F172A'),
-        spaceBefore=15,
-        spaceAfter=10
+        spaceBefore=14,
+        spaceAfter=8
     )
 
     elements.append(Paragraph("<b>CAFE MAFIA STATISTICAL REPORT</b>", title_style))
-    elements.append(Paragraph("Leaderboard & Player Performance (Minimum 10 Games)", subtitle_style))
+    elements.append(Paragraph("Official Performance & Win Rate (Minimum 10 Games)", subtitle_style))
 
-    # ۱. جدول اصلی تمام بازیکنان
     table_data = [["Rank", "Player", "Matches", "Win Rate", "Mafia Record", "Citizen Record"]]
     for idx, row in enumerate(results, 1):
         name, total_g, win_rate, m_games, m_wins, c_games, c_wins = row
@@ -281,7 +300,7 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
         ('ALIGN', (1, 1), (1, -1), 'LEFT'),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, 0), 10),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 7),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#F8FAFC'), colors.HexColor('#FFFFFF')]),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
         ('FONTSIZE', (0, 1), (-1, -1), 9),
@@ -289,9 +308,8 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
         ('BOTTOMPADDING', (0, 1), (-1, -1), 5),
     ]))
     elements.append(main_table)
-    elements.append(Spacer(1, 20))
+    elements.append(Spacer(1, 15))
 
-    # ۲. برترین‌های ساید مافیا و ساید شهروندی در دو ستون
     elements.append(Paragraph("<b>Top Performers by Side</b>", section_style))
     top_side_data = [["Top Mafia Players", "Top Citizen Players"]]
     max_len = max(len(mafia_leaders[:5]), len(citizen_leaders[:5]))
@@ -319,7 +337,7 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
     doc.build(elements)
     return filename
 
-# ================= ارسال پیام‌های متنی بلند =================
+# ================= ارسال ایمن پیام‌های طولانی =================
 async def send_large_text(update_or_chat_id, text, context):
     max_len = 3800
     lines = text.split('\n')
@@ -356,14 +374,22 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
     TOTAL_PROCESSED_COUNT += added
 
+    # استعلام تعداد کل بازی‌های متمایز موجود در دیتابیس
+    conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM processed_games")
+    all_stored_games = c.fetchone()[0]
+    conn.close()
+
     try:
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                f"📥 **گزارش پردازش دسته‌ای:**\n"
-                f"🔹 پیام‌های فوروارد شده: {len(messages)}\n"
-                f"✅ بازی‌های جدید ثبت‌شده: {added}\n"
-                f"📊 کل بازی‌های ثبت‌شده در دیتابیس: {TOTAL_PROCESSED_COUNT}"
+                f"📥 **گزارش پردازش و به‌روزرسانی دیتابیس:**\n"
+                f"🔹 پیام‌های بررسی‌شده در این نوبت: {len(messages)}\n"
+                f"✅ بازی‌های جدید اضافه شده: {added}\n"
+                f"🔁 بازی‌های تکراری رد شده (مو به مو یکسان): {len(messages) - added}\n"
+                f"📊 مجموع کل بازی‌های ثبت‌شده در سیستم: {all_stored_games}"
             ),
             parse_mode="Markdown"
         )
@@ -395,9 +421,9 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "سلام! ربات تحلیل آماری بازی‌های مافیا آماده است.\n\n"
-        "پیام‌ها را فوروارد کنید؛ سیستم همه را پردازش می‌کند.\n"
-        "با ارسال دستور /report گزارش متنی و فایل PDF برای شما صادر خواهد شد."
+        "سلام! سیستم دریافت اطلاعات مافیا فعال است.\n"
+        "پیام‌های بازی را فوروارد کنید؛ موارد تکراریِ مو به مو حذف شده و بقیه به دیتابیس افزوده می‌شوند.\n"
+        "برای دریافت گزارش متنی و PDF دستور /report را بفرستید."
     )
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -405,7 +431,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
         c = conn.cursor()
 
-        # شرط حداقل ۱۰ بازی (total_games >= 10)
+        # شرط حداقل ۱۰ بازی
         c.execute('''
             SELECT 
                 p.name,
@@ -425,10 +451,10 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
     if not results:
-        await update.message.reply_text("هنوز بازیکنی با حداقل ۱۰ بازی در سیستم ثبت نشده است.")
+        await update.message.reply_text("هنوز بازیکنی به حد نصاب حداقل ۱۰ بازی نرسیده است.")
         return
 
-    report = "📊 **رتبه‌بندی نهایی بازیکنان (حداقل ۱۰ بازی)**\n\n"
+    report = "📊 **رتبه‌بندی بازیکنان (حداقل ۱۰ بازی)**\n\n"
     mafia_leaders = []
     citizen_leaders = []
 
@@ -457,10 +483,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for r, (n, rate, games, wins) in enumerate(citizen_leaders[:5], 1):
         report += f"{r}. {n.title()} ⟵ {rate}% برد ({wins}/{games})\n"
 
-    # ارسال گزارش متنی
     await send_large_text(update, report, context)
 
-    # ساخت و ارسال فایل سند PDF
+    # ایجاد و ارسال فایل سند PDF
     pdf_path = generate_pdf_report(results, mafia_leaders, citizen_leaders)
     try:
         with open(pdf_path, 'rb') as pdf_file:
@@ -468,15 +493,15 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=update.effective_chat.id,
                 document=pdf_file,
                 filename="CafeMafia_Leaderboard.pdf",
-                caption="📄 نسخه PDF گزارش جامع عملکرد بازیکنان (بالای ۱۰ بازی)"
+                caption="📄 نسخه PDF گزارش عملکرد بازیکنان (حداقل ۱۰ بازی)"
             )
     except Exception as e:
         print(f"Error sending PDF: {e}")
 
-# ================= راه‌اندازی =================
+# ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با سیستم گزارش‌گیری PDF و حداقل ۱۰ بازی فعال شد...")
+    print("ربات فعال شد و آماده پردازش و تجمیع داده‌هاست...")
     
     app = (
         ApplicationBuilder()
