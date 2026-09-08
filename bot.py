@@ -44,7 +44,6 @@ BATCH_TASKS = {}
 TOTAL_PROCESSED_COUNT = 0
 DB_LOCK = asyncio.Lock()
 
-# مراحل مکالمه
 SEARCH_STATE = 1
 LINK_PROFILE_STATE = 2
 ADD_CHANNEL_STATE = 3
@@ -116,7 +115,7 @@ def extract_roles_from_image(image_bytes):
         print(f"Error during OCR extraction: {e}")
         return {}
 
-# ================= ساختار دیتابیس =================
+# ================= ساختار و ترمیم خودکار دیتابیس =================
 def init_db():
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
@@ -129,7 +128,26 @@ def init_db():
         )
     ''')
 
-    c.execute("INSERT OR IGNORE INTO channels (name) VALUES ('پیش‌فرض (اصلی)')")
+    # کانال اصلی cafe mafia
+    c.execute("INSERT OR IGNORE INTO channels (id, name) VALUES (1, 'cafe mafia')")
+    c.execute("SELECT id FROM channels WHERE LOWER(name) = 'cafe mafia'")
+    cafe_mafia_id = c.fetchone()[0]
+
+    # بررسی و افزودن ستون channel_id به matches در صورت نبودن
+    c.execute("PRAGMA table_info(matches)")
+    columns = [row[1] for row in c.fetchall()]
+    if columns and 'channel_id' not in columns:
+        c.execute("ALTER TABLE matches ADD COLUMN channel_id INTEGER DEFAULT 1")
+
+    # بررسی و افزودن ستون channel_id به processed_games
+    c.execute("PRAGMA table_info(processed_games)")
+    pg_columns = [row[1] for row in c.fetchall()]
+    if pg_columns and 'channel_id' not in pg_columns:
+        c.execute("ALTER TABLE processed_games ADD COLUMN channel_id INTEGER DEFAULT 1")
+
+    # ترمیم قطعی: تبدیل تمام رکوردهای NULL قبلی به کانال cafe mafia
+    c.execute("UPDATE matches SET channel_id = ? WHERE channel_id IS NULL OR channel_id = 0", (cafe_mafia_id,))
+    c.execute("UPDATE processed_games SET channel_id = ? WHERE channel_id IS NULL OR channel_id = 0", (cafe_mafia_id,))
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS user_active_channel (
@@ -150,30 +168,6 @@ def init_db():
         CREATE TABLE IF NOT EXISTS players (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT UNIQUE COLLATE NOCASE
-        )
-    ''')
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS processed_games (
-            game_signature TEXT,
-            channel_id INTEGER DEFAULT 1,
-            PRIMARY KEY (game_signature, channel_id)
-        )
-    ''')
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            player_id INTEGER,
-            channel_id INTEGER DEFAULT 1,
-            game_signature TEXT,
-            event_id TEXT,
-            scenario TEXT,
-            side TEXT,
-            is_win INTEGER,
-            UNIQUE(player_id, game_signature, channel_id),
-            FOREIGN KEY(player_id) REFERENCES players(id),
-            FOREIGN KEY(channel_id) REFERENCES channels(id)
         )
     ''')
 
@@ -223,9 +217,13 @@ def get_user_channel(c, user_id):
         ch = c.fetchone()
         if ch:
             return ch[0], ch[1]
-    
-    c.execute("SELECT id, name FROM channels ORDER BY id ASC LIMIT 1")
+
+    # پیش‌فرض مطلق روی cafe mafia
+    c.execute("SELECT id, name FROM channels WHERE LOWER(name) = 'cafe mafia'")
     default_ch = c.fetchone()
+    if not default_ch:
+        c.execute("SELECT id, name FROM channels ORDER BY id ASC LIMIT 1")
+        default_ch = c.fetchone()
     return default_ch[0], default_ch[1]
 
 def get_or_create_player(cursor, raw_name):
@@ -301,7 +299,7 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= ثبت بازی بر اساس کانال فعال =================
+# ================= ثبت نبرد با کانال فعال =================
 def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1):
     try:
         norm = normalize_text(raw_text)
@@ -437,7 +435,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         return False
 
 # ================= ساخت فایل PDF =================
-def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="پیش‌فرض", filename="Mafia_Leaderboard.pdf"):
+def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="cafe mafia", filename="Mafia_Leaderboard.pdf"):
     doc = SimpleDocTemplate(
         filename,
         pagesize=letter,
@@ -477,7 +475,7 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="�
     )
 
     elements.append(Paragraph(f"👑 <b>CAFE MAFIA GRAND CHAMPIONSHIP</b> 👑", title_style))
-    elements.append(Paragraph(f"Channel / League: <b>{channel_name}</b> • Bayesian Volume Regularization", subtitle_style))
+    elements.append(Paragraph(f"League / Channel: <b>{channel_name.upper()}</b> • Bayesian Volume Regularization", subtitle_style))
 
     table_data = [["Rank", "Player", "Matches", "Bayesian Pts", "Win Rate", "Mafia (W/G)", "Citizen (W/G)"]]
     for idx, p in enumerate(results, 1):
@@ -561,7 +559,7 @@ def get_main_keyboard():
     keyboard = [
         [KeyboardButton("🏆 تالار افتخارات و رتبه‌بندی بیزی (PDF)")],
         [KeyboardButton("👤 کارنامه من"), KeyboardButton("🔍 جستجوی کارت بازیکن")],
-        [KeyboardButton("📢 انتخاب / افزودن کانال"), KeyboardButton("🔗 اتصال نام بازی من")],
+        [KeyboardButton("📢 انتخاب / تغییر کانال"), KeyboardButton("🔗 اتصال نام بازی من")],
         [KeyboardButton("📜 راهنمای رتبه‌بندی")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -592,7 +590,7 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM processed_games WHERE channel_id = ?", (ch_id,))
+    c.execute("SELECT COUNT(*) FROM processed_games WHERE (channel_id = ? OR channel_id IS NULL)", (ch_id,))
     all_stored_games = c.fetchone()[0]
     conn.close()
 
@@ -662,20 +660,21 @@ async def channel_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     active_id, active_name = get_user_channel(c, update.effective_user.id)
     conn.close()
 
-    msg = f"📢 **مدیریت کانال‌ها و لیگ‌ها:**\n"
+    msg = f"📢 **مدیریت و تعیین کانال / لیگ فعال:**\n"
     msg += f"🔹 کانال فعال فعلی شما: **{active_name}**\n\n"
     msg += "لیست کانال‌های موجود:\n"
     for idx, (cid, cname) in enumerate(all_channels, 1):
-        mark = " (فعال)" if cid == active_id else ""
+        mark = " 👈 (انتخاب‌شده)" if cid == active_id else ""
         msg += f"{idx}. `{cname}`{mark}\n"
 
-    msg += "\nبرای انتخاب کانال موجود یا ساخت کانال جدید، نام کانال را بفرستید:"
+    msg += "\n⚠️ **نکته:** قبل از ارسال بازی مطمئن شوید کانال مورد نظر فعال است.\n"
+    msg += "برای انتخاب کانال موجود یا ساخت کانال جدید، نام کانال را بفرستید:"
 
     await update.message.reply_text(msg, parse_mode="Markdown")
     return ADD_CHANNEL_STATE
 
 async def channel_save_or_switch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    new_ch_name = update.message.text.strip()
+    new_ch_name = update.message.text.strip().lower()
     user_id = update.effective_user.id
 
     if len(new_ch_name) < 2:
@@ -685,7 +684,7 @@ async def channel_save_or_switch(update: Update, context: ContextTypes.DEFAULT_T
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO channels (name) VALUES (?)", (new_ch_name,))
-    c.execute("SELECT id FROM channels WHERE LOWER(name) = LOWER(?)", (new_ch_name,))
+    c.execute("SELECT id FROM channels WHERE LOWER(name) = ?", (new_ch_name,))
     ch_id = c.fetchone()[0]
 
     c.execute('''
@@ -697,7 +696,7 @@ async def channel_save_or_switch(update: Update, context: ContextTypes.DEFAULT_T
 
     await update.message.reply_text(
         f"✅ کانال فعال شما به **{new_ch_name}** تغییر یافت.\n"
-        f"تمامی نبردهای جدید و گزارش‌ها مربوط به این کانال خواهد بود.",
+        f"تمام بازی‌های جدیدی که بفرستید یا گزارش‌هایی که بگیرید در این کانال لحاظ می‌شوند.",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
@@ -782,10 +781,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
-        f"🔹 **پشتیبانی از چند کانال / لیگ مجزا:**\n"
-        f"می‌توانید برای هر کانال دیتابیس جداگانه داشته باشید یا از کانال پیش‌فرض استفاده کنید.\n\n"
+        f"🔹 **پشتیبانی از تفکیک کانال‌ها:**\n"
+        f"تمام داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند. می‌توانید کانال جدید ایجاد یا انتخاب کنید.\n\n"
         f"🔹 **پروفایل شخصی خودکار:**\n"
-        f"با زدن «🔗 اتصال نام بازی من»، یک‌بار اسمتان را ثبت کنید تا با زدن «👤 کارنامه من» آمار خود را دریافت کنید.\n\n"
+        f"با زدن «🔗 اتصال نام بازی من»، یک‌بار اسمتان را ثبت کنید تا با زدن «👤 کارنامه من» آمار اختصاصی‌تان را ببینید.\n\n"
         f"🔹 **الگوریتم بیزی با ضریب ثبات سنگین:**\n"
         f"ثبات در تعداد بازی‌های بالا ارزش‌گذاری می‌شود.\n\n"
         f"🔹 **موتور OCR تطبیق تصویر:**\n"
@@ -799,12 +798,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📜 **راهنمای جامع سامانه:**\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "▫️ **تغییر کانال:** با زدن «📢 انتخاب / افزودن کانال» می‌توانید کانال فعال را تغییر دهید یا کانال جدیدی بسازید.\n"
-        "▫️ **کارنامه شخصی:** با زدن «🔗 اتصال نام بازی من» یک‌بار اسمتان را متصل کنید تا با «👤 کارنامه من» آمار دقیق خود را ببینید.\n"
+        "▫️ **تغییر کانال:** قبل از ارسال بازی، با زدن «📢 انتخاب / تغییر کانال» مشخص کنید داده‌ها متعلق به کدام کانال است.\n"
+        "▫️ **کارنامه شخصی:** با زدن «🔗 اتصال نام بازی من» اسمتان را متصل کنید تا با «👤 کارنامه من» آمار خود را ببینید.\n"
         "▫️ **ارسال بازی:** متن و عکس ایونت را فوروارد کنید تا در کانال فعال ثبت شود."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
+# ================= گزارش رسمی و لیدربرد =================
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     async with DB_LOCK:
@@ -813,6 +813,8 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ch_id, ch_name = get_user_channel(c, user_id)
 
         placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
+        
+        # در نظر گرفتن فال‌بک برای channel_id های پیش‌فرض
         c.execute(f'''
             SELECT 
                 AVG(is_win) as global_win_mean,
@@ -820,8 +822,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 AVG(CASE WHEN side = 'Citizen' THEN is_win END) as citizen_win_mean
             FROM matches m
             JOIN players p ON p.id = m.player_id
-            WHERE LOWER(p.name) NOT IN ({placeholders}) AND m.channel_id = ?
-        ''', list(EXCLUDED_PLAYERS) + [ch_id])
+            WHERE LOWER(p.name) NOT IN ({placeholders}) 
+              AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
+        ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
         global_stats = c.fetchone()
 
         m_global = global_stats[0] if (global_stats and global_stats[0] is not None) else 0.50
@@ -839,16 +842,18 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
             FROM players p
             JOIN matches m ON p.id = m.player_id
-            WHERE LOWER(p.name) NOT IN ({placeholders}) AND m.channel_id = ?
+            WHERE LOWER(p.name) NOT IN ({placeholders}) 
+              AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
             GROUP BY LOWER(p.name)
             HAVING total_games >= 18
-        ''', list(EXCLUDED_PLAYERS) + [ch_id])
+        ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
         rows = c.fetchall()
         conn.close()
 
     if not rows:
         await update.message.reply_text(
-            f"هنوز در کانال **{ch_name}** بازیکنی به حد نصاب حداقل ۱۸ بازی نرسیده است.",
+            f"هنوز در کانال **{ch_name}** بازیکنی به حد نصاب حداقل ۱۸ بازی نرسیده است.\n"
+            f"اگر داده‌های قبلی را می‌خواهید، از منو کانال فعال را روی **cafe mafia** بگذارید.",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
@@ -912,7 +917,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mafia_candidates.sort(key=lambda x: (x['bayes'], x['games']), reverse=True)
     citizen_candidates.sort(key=lambda x: (x['bayes'], x['games']), reverse=True)
 
-    report = f"👑 **جدول برترین‌های لیگ: {ch_name}** 👑\n"
+    report = f"👑 **جدول برترین‌های لیگ: {ch_name.upper()}** 👑\n"
     report += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
     for idx, p in enumerate(processed_list, 1):
@@ -968,6 +973,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Error sending PDF: {e}")
 
+# ================= نمایش کارت اختصاصی بازیکن =================
 async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name: str):
     query = query_name.strip().lower()
     if query in PLAYER_ALIASES:
@@ -985,8 +991,9 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
         c.execute(f'''
             SELECT AVG(is_win) FROM matches m
             JOIN players p ON p.id = m.player_id
-            WHERE LOWER(p.name) NOT IN ({placeholders}) AND m.channel_id = ?
-        ''', list(EXCLUDED_PLAYERS) + [ch_id])
+            WHERE LOWER(p.name) NOT IN ({placeholders}) 
+              AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
+        ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
         global_avg_row = c.fetchone()
         m_global = global_avg_row[0] if (global_avg_row and global_avg_row[0] is not None) else 0.50
 
@@ -1002,9 +1009,10 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
                 SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
             FROM players p
             JOIN matches m ON p.id = m.player_id
-            WHERE LOWER(p.name) NOT IN ({placeholders}) AND m.channel_id = ?
+            WHERE LOWER(p.name) NOT IN ({placeholders}) 
+              AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
             GROUP BY LOWER(p.name)
-        ''', list(EXCLUDED_PLAYERS) + [ch_id])
+        ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
         all_players_raw = c.fetchall()
         conn.close()
 
@@ -1105,7 +1113,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با پردازش هوشمند تصویر و متن فعال شد...")
+    print("دیتابیس ترمیم شد و ربات با کانال پیش‌فرض cafe mafia فعال است...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
@@ -1146,7 +1154,7 @@ if __name__ == '__main__':
 
     channel_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex("^📢 انتخاب / افزودن کانال$"), channel_menu_handler)
+            MessageHandler(filters.Regex("^📢 انتخاب / تغییر کانال$"), channel_menu_handler)
         ],
         states={
             ADD_CHANNEL_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, channel_save_or_switch)]
