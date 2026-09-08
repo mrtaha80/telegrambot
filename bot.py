@@ -54,7 +54,7 @@ SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫�
 # فقط ali و sara نادیده گرفته می‌شوند
 EXCLUDED_PLAYERS = {'ali', 'sara'}
 
-# دیکشنری ادغام اسامی
+# دیکشنری نگاشت مستقیم اسامی
 PLAYER_ALIASES = {
     # ادغام به omid
     'mohammad a': 'omid',
@@ -71,10 +71,43 @@ PLAYER_ALIASES = {
     'hosein': 'hossein ss',
     'hosein ss': 'hossein ss',
 
-    # ادغام به mmd4030
+    # ادغام انواع محمد و ممد به mmd4030
+    'mmd': 'mmd4030',
+    'mmd 4030': 'mmd4030',
+    'mmd-4030': 'mmd4030',
+    'mmd_4030': 'mmd4030',
     'mohamad': 'mmd4030',
     'mohammad': 'mmd4030',
+    'mohammad 4030': 'mmd4030',
+    'mohamad 4030': 'mmd4030',
+    'mohammad4030': 'mmd4030',
+    'mohamad4030': 'mmd4030',
 }
+
+def resolve_player_name(raw_name):
+    """استانداردسازی و تبدیل تمام حالات مشابه به نام اصلی"""
+    name = raw_name.strip().lower()
+    name = re.sub(rf'[{SEAT_SYMBOLS}]', '', name)
+    name = re.sub(r'[\.\-_:]', ' ', name)
+    name = " ".join(name.split())
+
+    if not name:
+        return ""
+
+    # اولویت اول: بررسی نگاشت‌های مستقیم
+    if name in PLAYER_ALIASES:
+        return PLAYER_ALIASES[name]
+
+    # اگر اسامی خاص omid باشد قبلاً رد شده، بررسی الگوهای نزدیک به mmd4030
+    # الگوهایی مانند: mmd 4030, mohammad 4030, mmd, mohamad
+    if re.search(r'^(mmd|moham+ad)(\s*4030)?$', name):
+        return 'mmd4030'
+
+    # بررسی فازی برای اسامی بسیار نزدیک به mmd4030
+    if fuzz.ratio(name, 'mmd4030') >= 80 or fuzz.ratio(name, 'mmd 4030') >= 80:
+        return 'mmd4030'
+
+    return name
 
 def normalize_text(text):
     if not text:
@@ -182,32 +215,27 @@ def init_db():
         )
     ''')
 
-    # اعمال تجمیع و ادغام خودکار اسامی در دیتابیس
-    target_names = set(PLAYER_ALIASES.values())
+    # ۱. ادغام و ایجاد رکوردهای مقصد (omid, alireza kamali, hossein ss, mmd4030)
+    target_names = {'omid', 'alireza kamali', 'hossein ss', 'mmd4030'}
     for target in target_names:
         c.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (target,))
-        c.execute("SELECT id FROM players WHERE LOWER(name) = ?", (target.lower(),))
-        target_id = c.fetchone()[0]
 
-        aliases = [src for src, dst in PLAYER_ALIASES.items() if dst == target]
-        alias_placeholders = ','.join(['?'] * len(aliases))
+    # ۲. پیدا کردن همه بازیکنان ثبت‌شده و هدایت آن‌ها طبق resolve_player_name
+    c.execute("SELECT id, LOWER(name) FROM players")
+    all_current_players = c.fetchall()
 
-        c.execute(f'''
-            SELECT id FROM players 
-            WHERE LOWER(name) IN ({alias_placeholders}) AND id != ?
-        ''', aliases + [target_id])
-        alias_players = c.fetchall()
+    for p_id, p_name in all_current_players:
+        resolved = resolve_player_name(p_name)
+        if resolved and resolved != p_name and resolved in target_names:
+            c.execute("SELECT id FROM players WHERE LOWER(name) = ?", (resolved,))
+            res_row = c.fetchone()
+            if res_row:
+                target_id = res_row[0]
+                c.execute("UPDATE OR IGNORE matches SET player_id = ? WHERE player_id = ?", (target_id, p_id))
+                c.execute("DELETE FROM matches WHERE player_id = ?", (p_id,))
+                c.execute("DELETE FROM players WHERE id = ?", (p_id,))
 
-        for (a_id,) in alias_players:
-            c.execute('''
-                UPDATE OR IGNORE matches 
-                SET player_id = ? 
-                WHERE player_id = ?
-            ''', (target_id, a_id))
-            c.execute("DELETE FROM matches WHERE player_id = ?", (a_id,))
-            c.execute("DELETE FROM players WHERE id = ?", (a_id,))
-
-    # حذف فقط ali و sara
+    # ۳. حذف فقط ali و sara
     placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
     c.execute(f'''
         DELETE FROM matches 
@@ -240,16 +268,10 @@ def get_user_channel(c, user_id):
     return default_ch[0], default_ch[1]
 
 def get_or_create_player(cursor, raw_name):
-    clean_name = raw_name.strip().lower()
-    clean_name = re.sub(rf'[{SEAT_SYMBOLS}]', '', clean_name)
-    clean_name = re.sub(r'[\.\-_:]', ' ', clean_name)
-    clean_name = " ".join(clean_name.split())
+    clean_name = resolve_player_name(raw_name)
 
     if not clean_name or len(clean_name) < 2 or clean_name.isdigit() or clean_name == 'god':
         return None, None
-
-    if clean_name in PLAYER_ALIASES:
-        clean_name = PLAYER_ALIASES[clean_name]
 
     if clean_name in EXCLUDED_PLAYERS:
         return None, None
@@ -395,12 +417,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             if not name or len(name) < 2 or not re.search(r'[a-zA-Z\u0600-\u06FF]', name):
                 continue
 
-            name_lower = name.strip().lower()
-            name_lower = re.sub(rf'[{SEAT_SYMBOLS}]', '', name_lower)
-            name_lower = " ".join(name_lower.split())
-
-            if name_lower in PLAYER_ALIASES:
-                name_lower = PLAYER_ALIASES[name_lower]
+            name_lower = resolve_player_name(name)
 
             if name_lower in EXCLUDED_PLAYERS:
                 seat_counter += 1
@@ -638,11 +655,8 @@ async def link_profile_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return LINK_PROFILE_STATE
 
 async def link_profile_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    player_name = update.message.text.strip().lower()
+    player_name = resolve_player_name(update.message.text)
     user_id = update.effective_user.id
-
-    if player_name in PLAYER_ALIASES:
-        player_name = PLAYER_ALIASES[player_name]
 
     if player_name in EXCLUDED_PLAYERS:
         await update.message.reply_text("❌ این نام در لیست سیاه آماری قرار دارد.", reply_markup=get_main_keyboard())
@@ -986,9 +1000,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= نمایش کارت اختصاصی بازیکن =================
 async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name: str):
-    query = query_name.strip().lower()
-    if query in PLAYER_ALIASES:
-        query = PLAYER_ALIASES[query]
+    query = resolve_player_name(query_name)
 
     if query in EXCLUDED_PLAYERS:
         await update.message.reply_text(f"❌ بازیکنی با نام «{query}» در لیست سیاه آماری قرار دارد.", reply_markup=get_main_keyboard())
@@ -1124,7 +1136,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با ادغام جدید علیرضا، حسین و محمد (mmd4030) و فیلتر فقط ali و sara فعال شد...")
+    print("ربات با ادغام تمام حالات محمد و ممد به mmd4030 فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
