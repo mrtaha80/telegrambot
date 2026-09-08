@@ -14,19 +14,16 @@ BATCH_TASKS = {}
 TOTAL_PROCESSED_COUNT = 0
 DB_LOCK = asyncio.Lock()
 
-# تبدیل فونت‌های فانتزی/یونیکد تلگرام به متن انگلیسی عادی
 def normalize_text(text):
     if not text:
         return ""
-    # تبدیل کاراکترهای فانتزی ریاضی یونیکد (Mathematical Alphanumeric Symbols)
     text = unicodedata.normalize('NFKD', text)
-    # استانداردسازی اعداد فارسی/عربی به انگلیسی
     persian_nums = '۰۱۲۳۴۵۶۷۸۹'
     for i, p in enumerate(persian_nums):
         text = text.replace(p, str(i))
     return text
 
-# ================= راه‌اندازی دیتابیس =================
+# ================= دیتابیس =================
 def init_db():
     conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
     c = conn.cursor()
@@ -58,6 +55,9 @@ def get_or_create_player(cursor, raw_name):
     clean_name = re.sub(r'[\.\-_:]', ' ', clean_name)
     clean_name = " ".join(clean_name.split())
 
+    if not clean_name or len(clean_name) < 2:
+        return None, None
+
     cursor.execute("SELECT id, name FROM players")
     existing_players = cursor.fetchall()
     
@@ -74,7 +74,7 @@ def get_or_create_player(cursor, raw_name):
     row = cursor.fetchone()
     return row[0], clean_name
 
-# ================= تشخیص ساید و نقش‌ها =================
+# ================= تشخیص نقش‌ها =================
 def detect_side(scenario, role):
     sc = scenario.lower().strip()
     ro = role.lower().strip()
@@ -113,12 +113,11 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= استخراج منعطف اطلاعات =================
+# ================= استخراج اطلاعات =================
 def process_text_data(raw_text, fallback_id):
     try:
         text = normalize_text(raw_text)
 
-        # استخراج سناریو و برنده با رجکس منعطف
         scenario_match = re.search(r'(?:scenario|سناریو)\s*[:•\-_]\s*([^\n\r]+)', text, re.IGNORECASE)
         win_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_]\s*([^\n\r]+)', text, re.IGNORECASE)
         event_match = re.search(r'(?:event|ایونت)\s*[:#•\-_ ]*([0-9]+)', text, re.IGNORECASE)
@@ -136,11 +135,9 @@ def process_text_data(raw_text, fallback_id):
         time_str = time_match.group(1).strip() if time_match else ""
         god_str = god_match.group(1).strip().lower() if god_match else ""
 
-        # ساخت امضای یکتا
         sig_raw = f"{event_id}_{scenario}_{date_str}_{time_str}_{god_str}"
         game_signature = hashlib.md5(sig_raw.encode('utf-8')).hexdigest()
 
-        # تعیین ساید برنده
         winning_side = None
         if any(w in win_text for w in ['مافیا', 'mafia']):
             winning_side = "Mafia"
@@ -150,7 +147,6 @@ def process_text_data(raw_text, fallback_id):
         if not winning_side:
             return False
 
-        # استخراج لیست بازیکنان با تفکیک ایمن
         players_block = ""
         players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|$)', text, re.IGNORECASE)
         if players_match:
@@ -164,15 +160,14 @@ def process_text_data(raw_text, fallback_id):
         inserted_any = False
         for line in players_block.strip().splitlines():
             line = line.strip()
-            if not line or line.startswith('━') or line.startswith('┄') or line.startswith('─'):
+            # فیلتر خطوط خالی، خط‌چین‌ها و ایموجی‌های جداکننده مثل 🥀
+            if not line or any(c in line for c in ['━', '┄', '─', '🥀']):
                 continue
 
-            # پاکسازی انواع پیشوندهای شماره و ایموجی (مثل ❶, ✦➊:, /➊•, 11., وغیره)
             clean_line = re.sub(r'^[^a-zA-Z\u0600-\u06FF]*[0-9➊-➓]+[^a-zA-Z\u0600-\u06FF]*', '', line).strip()
             if not clean_line:
                 continue
 
-            # حذف توضیحات اضافه داخل پرانتز و علامت‌های اشاره
             clean_line = re.sub(r'[👈👉].*$', '', clean_line).strip()
             clean_line = re.sub(r'\(.*?\)', '', clean_line).strip()
 
@@ -180,7 +175,6 @@ def process_text_data(raw_text, fallback_id):
             if not tokens:
                 continue
 
-            # استخراج نام و نقش
             if len(tokens) >= 3 and any(k in " ".join(tokens[-2:]) for k in ['مافیا', 'ساده', 'مافیای ساده', 'رئیس مافیا', 'گودمن']):
                 name = " ".join(tokens[:-2])
                 role = " ".join(tokens[-2:])
@@ -198,9 +192,11 @@ def process_text_data(raw_text, fallback_id):
             if side == "Independent":
                 continue
 
-            is_win = 1 if side == winning_side else 0
             player_id, _ = get_or_create_player(c, name)
+            if not player_id:
+                continue
 
+            is_win = 1 if side == winning_side else 0
             c.execute('''
                 INSERT OR IGNORE INTO matches (player_id, game_signature, event_id, scenario, side, is_win)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -217,7 +213,26 @@ def process_text_data(raw_text, fallback_id):
         print(f"Error parsing event: {e}")
         return False
 
-# ================= هندلرهای تلگرام =================
+# تابع تقسیم پیام‌های طولانی به بسته‌های زیر ۴۰۰۰ کاراکتر
+async def send_large_text(update_or_chat_id, text, context):
+    max_len = 3800
+    lines = text.split('\n')
+    current_chunk = ""
+    
+    target_chat = update_or_chat_id if isinstance(update_or_chat_id, (int, str)) else update_or_chat_id.effective_chat.id
+
+    for line in lines:
+        if len(current_chunk) + len(line) + 1 > max_len:
+            await context.bot.send_message(chat_id=target_chat, text=current_chunk, parse_mode="Markdown")
+            current_chunk = line + "\n"
+            await asyncio.sleep(0.3)
+        else:
+            current_chunk += line + "\n"
+            
+    if current_chunk.strip():
+        await context.bot.send_message(chat_id=target_chat, text=current_chunk, parse_mode="Markdown")
+
+# ================= هندلرها =================
 async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global TOTAL_PROCESSED_COUNT
     await asyncio.sleep(2.5)
@@ -236,30 +251,31 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
     TOTAL_PROCESSED_COUNT += added
 
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"📥 **گزارش پردازش دسته‌ای:**\n"
-            f"🔹 کل پیام‌های فوروارد شده: {len(messages)}\n"
-            f"✅ بازی‌های جدید و معتبر ثبت‌شده: {added}\n"
-            f"📊 مجموع کل بازی‌ها در سیستم: {TOTAL_PROCESSED_COUNT}"
-        ),
-        parse_mode="Markdown"
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"📥 **گزارش پردازش دسته‌ای:**\n"
+                f"🔹 کل پیام‌های دریافت شده: {len(messages)}\n"
+                f"✅ بازی‌های جدید ثبت‌شده: {added}\n"
+                f"📊 مجموع کل بازی‌های ثبت‌شده: {TOTAL_PROCESSED_COUNT}"
+            ),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Error sending batch summary: {e}")
 
 async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.channel_post or update.message
     if not msg:
         return
 
-    # خواندن متن چه به عنوان متن عادی و چه به عنوان کپشن عکس
     raw_content = msg.text or msg.caption
     if not raw_content:
         return
 
     norm_content = normalize_text(raw_content).lower()
     
-    # فیلتر بسیار منعطف برای اطمینان از رد نشدن پیام‌های بازی
     if any(k in norm_content for k in ['player', 'بازیکن', 'سیت', 'ساده', 'مافیا']) and any(w in norm_content for w in ['win', 'برد', 'شهروند', 'مافیا']):
         chat_id = msg.chat_id
         if chat_id not in BATCH_STORAGE:
@@ -273,18 +289,13 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
         BATCH_TASKS[chat_id] = asyncio.create_task(flush_batch(chat_id, context))
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "سلام! ربات تحلیل بازی‌های مافیا فعال است.\n"
-        "می‌توانید پیام‌ها را (چه همراه عکس و چه متن خالی) فوروارد کنید.\n"
-        "برای مشاهده رتبه‌بندی دستور /report را ارسال نمایید."
-    )
+    await update.message.reply_text("ربات آماده است! پیام‌ها را ارسال کنید و با /report گزارش بگیرید.")
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with DB_LOCK:
         conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
         c = conn.cursor()
 
-        # شرط تغییر یافته به حداقل ۱ بازی (>= 1)
         c.execute('''
             SELECT 
                 p.name,
@@ -304,10 +315,10 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
     if not results:
-        await update.message.reply_text("هنوز هیچ بازی‌ای در دیتابیس ثبت نشده است.")
+        await update.message.reply_text("هنوز هیچ بازی‌ای در سیستم ذخیره نشده است.")
         return
 
-    report = "📊 **رتبه‌بندی نهایی تمام بازیکنان**\n\n"
+    report = "📊 **رتبه‌بندی عملکرد بازیکنان**\n\n"
     mafia_leaders = []
     citizen_leaders = []
 
@@ -321,32 +332,41 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if c_games > 0:
             citizen_leaders.append((name, c_rate, c_games, c_wins))
 
-        report += f"🎖 **رتبه {idx}: {name.title()}**\n"
-        report += f"🎮 کل بازی‌ها: {total_g} | 🏆 درصد برد کل: {win_rate:.1f}%\n"
-        report += f"🔪 مافیا: {m_rate}% برد ({m_wins} از {m_games})\n"
-        report += f"🛡 شهروند: {c_rate}% برد ({c_wins} از {c_games})\n"
-        report += "─────────────────────\n"
+        report += f"🎖 **{idx}. {name.title()}**\n"
+        report += f"🎮 بازی‌ها: {total_g} | 🏆 برد کل: {win_rate:.1f}%\n"
+        report += f"🔪 مافیا: {m_rate}% ({m_wins}/{m_games}) | 🛡 شهر: {c_rate}% ({c_wins}/{c_games})\n"
+        report += "─────────────────\n"
 
     mafia_leaders.sort(key=lambda x: (x[1], x[2]), reverse=True)
-    report += "\n🔥 **۵ بازیکن برتر در ساید مافیا:**\n"
+    report += "\n🔥 **برترین‌های ساید مافیا:**\n"
     for r, (n, rate, games, wins) in enumerate(mafia_leaders[:5], 1):
-        report += f"{r}. {n.title()} ⟵ {rate}% برد ({wins} برد از {games} بازی)\n"
+        report += f"{r}. {n.title()} ⟵ {rate}% برد ({wins}/{games})\n"
 
     citizen_leaders.sort(key=lambda x: (x[1], x[2]), reverse=True)
-    report += "\n🛡 **۵ بازیکن برتر در ساید شهروند:**\n"
+    report += "\n🛡 **برترین‌های ساید شهروند:**\n"
     for r, (n, rate, games, wins) in enumerate(citizen_leaders[:5], 1):
-        report += f"{r}. {n.title()} ⟵ {rate}% برد ({wins} برد از {games} بازی)\n"
+        report += f"{r}. {n.title()} ⟵ {rate}% برد ({wins}/{games})\n"
 
-    await update.message.reply_text(report, parse_mode="Markdown")
+    # ارسال امن پیام‌ها بدون محدودیت طول کاراکتر
+    await send_large_text(update, report, context)
 
+# ================= راه‌اندازی =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با فیلتر منعطف فعال شد...")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    print("ربات با سیستم مدیریت پیام‌های طولانی فعال شد...")
+    
+    # افزایش تایم‌اوت شبکه برای مقابله با کندی پروکسی
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .read_timeout(60)
+        .write_timeout(60)
+        .connect_timeout(60)
+        .build()
+    )
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("report", report_command))
-    # گوش دادن به پیام‌های متنی، عکس‌دار و کانال
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_incoming_messages))
 
     app.run_polling()
