@@ -7,6 +7,7 @@ import logging
 import unicodedata
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.request import HTTPXRequest
 from fuzzywuzzy import process
 
 from reportlab.lib.pagesizes import letter
@@ -14,7 +15,6 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
-# خاموش کردن لاگ‌های اخطار فازی
 logging.getLogger('fuzzywuzzy').setLevel(logging.ERROR)
 
 BOT_TOKEN = '8936060141:AAHD7N56eK7FtIq_FBy8E1txGNKkV2lWQjI'
@@ -131,7 +131,7 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= استخراج اطلاعات و رد تکراری مو به مو =================
+# ================= پردازش اطلاعات =================
 def process_text_data(raw_text, fallback_id):
     try:
         cleaned_raw = "".join(raw_text.split())
@@ -232,7 +232,7 @@ def process_text_data(raw_text, fallback_id):
         print(f"Error parsing event: {e}")
         return False
 
-# ================= ساخت فایل PDF =================
+# ================= ساخت PDF =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia_Leaderboard.pdf"):
     doc = SimpleDocTemplate(
         filename,
@@ -334,7 +334,7 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
     doc.build(elements)
     return filename
 
-# ================= ارسال پیام‌های طولانی =================
+# ================= ارسال پیام طولانی =================
 async def send_large_text(update_or_chat_id, text, context):
     max_len = 3800
     lines = text.split('\n')
@@ -416,7 +416,7 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
         BATCH_TASKS[chat_id] = asyncio.create_task(flush_batch(chat_id, context))
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("ربات آماده دریافت است! پیام‌ها را فوروارد کنید و با /report آمار بگیرید.")
+    await update.message.reply_text("ربات آماده است! پیام‌ها را فوروارد کنید و با /report آمار بگیرید.")
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with DB_LOCK:
@@ -489,20 +489,27 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Error sending PDF: {e}")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # جلوگیری از بسته شدن برنامه در هنگام قطعی موقت فیلترشکن
     logging.warning(f"شبکه با اختلال موقت مواجه شد: {context.error}")
 
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با دیتابیس نو و رفع کامل خطای شبکه فعال شد...")
+    print("ربات با ظرفیت اتصال بالا (Pool Size 100) فعال شد...")
+    
+    # تنظیم ابزار مدیریت شبکه با پشتیبانی از حجم بالای اتصال موازی
+    custom_request = HTTPXRequest(
+        connection_pool_size=100,
+        pool_timeout=60.0,
+        read_timeout=60.0,
+        write_timeout=60.0,
+        connect_timeout=60.0
+    )
     
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .read_timeout(60)
-        .write_timeout(60)
-        .connect_timeout(60)
+        .request(custom_request)
+        .get_updates_request(custom_request)
         .build()
     )
     
