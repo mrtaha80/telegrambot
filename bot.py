@@ -1,12 +1,17 @@
 import re
+import hashlib
 import sqlite3
+import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from fuzzywuzzy import process
 
-# ================= تنظیمات احراز هویت =================
-# تنها با توکن بات‌فادر بدون نیاز به API_ID
 BOT_TOKEN = '8936060141:AAHD7N56eK7FtIq_FBy8E1txGNKkV2lWQjI'
+
+# مدیریت بافر برای ارسال دسته‌ای پیام‌ها
+BATCH_STORAGE = {}
+BATCH_TASKS = {}
+TOTAL_PROCESSED_COUNT = 0
 
 # ================= دیتابیس =================
 def init_db():
@@ -18,15 +23,17 @@ def init_db():
             name TEXT UNIQUE COLLATE NOCASE
         )
     ''')
+    # جدول بازی‌ها با کلید یکتای ترکیبی (Hash) برای جلوگیری از تداخل
     c.execute('''
         CREATE TABLE IF NOT EXISTS matches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             player_id INTEGER,
+            game_signature TEXT,
             event_id TEXT,
             scenario TEXT,
             side TEXT,
             is_win INTEGER,
-            UNIQUE(player_id, event_id),
+            UNIQUE(player_id, game_signature),
             FOREIGN KEY(player_id) REFERENCES players(id)
         )
     ''')
@@ -51,20 +58,17 @@ def get_or_create_player(cursor, raw_name):
     row = cursor.fetchone()
     return row[0], clean_name
 
-# ================= منطق تشخیص نقش و سناریو =================
+# ================= تشخیص نقش و سناریو =================
 def detect_side(scenario, role):
     sc = scenario.lower().strip()
     ro = role.lower().strip()
 
-    # ۱. نقش‌های مستقل
     independents = ['jack', 'جک', 'nostra', 'نوسترا', 'sherlock', 'شرلوک', 'churchill', 'چرچیل']
     if any(ind in ro for ind in independents):
         return "Independent"
 
-    # ۲. مافیاهای پایه و اضافه شونده در بازی‌های ۱۲ الی ۱۵ نفره
     mafia_roles = ['don', 'دن', 'nato', 'ناتو', 'mafia', 'مافیا']
 
-    # ۳. مافیاهای اختصاصی هر سناریو
     if any(s in sc for s in ['takavar', 'تکاور']):
         mafia_roles.extend(['grogangir', 'گروگانگیر', 'گروگان گیر'])
     elif any(s in sc for s in ['bazpors', 'بازپرس']):
@@ -76,6 +80,7 @@ def detect_side(scenario, role):
     elif any(s in sc for s in ['hanibal', 'هانیبال']):
         mafia_roles.extend(['hanibal', 'هانیبال', 'saye', 'سایه'])
     elif any(s in sc for s in ['namayande', 'نماینده']):
+        # در سناریو نماینده وکیل شهروند است و یاغی/هکر مافیا هستند
         mafia_roles.extend(['yaghi', 'یاغی', 'hacker', 'هکر'])
     elif any(s in sc for s in ['pishrafte', 'پیشرفته']):
         mafia_roles.extend(['vakil', 'وکیل', 'terrorist', 'تروریست', 'natasha', 'ناتاشا'])
@@ -90,19 +95,29 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= استخراج اطلاعات بازی =================
-def process_text_data(text, unique_msg_id):
+# ================= استخراج دقیق اطلاعات =================
+def process_text_data(text, fallback_id):
     try:
         scenario_match = re.search(r'𝐒𝐂𝐄𝐍𝐀𝐑𝐈𝐎\s*•\s*(.+)', text)
         win_match = re.search(r'𝐖𝐈𝐍\s*•\s*(.+)', text)
         event_match = re.search(r'𝐄𝐕𝐄𝐍𝐓\s*•\s*([0-9]+)', text)
+        date_match = re.search(r'𝐃𝐀𝐓𝐄\s*•\s*(.+)', text)
+        time_match = re.search(r'𝐓𝐈𝐌𝐄\s*•\s*(.+)', text)
+        god_match = re.search(r'𝐆𝐎𝐃\s*•\s*(.+)', text)
 
         if not scenario_match or not win_match:
             return False
 
         scenario = scenario_match.group(1).strip()
         win_text = win_match.group(1).strip().lower()
-        event_id = event_match.group(1).strip() if event_match else str(unique_msg_id)
+        event_id = event_match.group(1).strip() if event_match else str(fallback_id)
+        date_str = date_match.group(1).strip() if date_match else ""
+        time_str = time_match.group(1).strip() if time_match else ""
+        god_str = god_match.group(1).strip().lower() if god_match else ""
+
+        # ساخت امضای یکتای چندمتغیره برای جلوگیری از تداخل ایونت‌های هم‌شماره
+        signature_raw = f"{event_id}_{scenario}_{date_str}_{time_str}_{god_str}"
+        game_signature = hashlib.md5(signature_raw.encode('utf-8')).hexdigest()
 
         winning_side = None
         if 'مافیا' in win_text or 'mafia' in win_text:
@@ -120,6 +135,7 @@ def process_text_data(text, unique_msg_id):
         conn = sqlite3.connect('mafia_stats.db')
         c = conn.cursor()
 
+        inserted_any = False
         for line in players_part.strip().splitlines():
             line = line.strip()
             slot_match = re.search(r'[➊-➓0-9۰-۹]+\s*[:\.\-]\s*(.+)', line)
@@ -153,37 +169,79 @@ def process_text_data(text, unique_msg_id):
             player_id, _ = get_or_create_player(c, name)
 
             c.execute('''
-                INSERT OR IGNORE INTO matches (player_id, event_id, scenario, side, is_win)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (player_id, event_id, scenario, side, is_win))
+                INSERT OR IGNORE INTO matches (player_id, game_signature, event_id, scenario, side, is_win)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (player_id, game_signature, event_id, scenario, side, is_win))
+            
+            if c.rowcount > 0:
+                inserted_any = True
 
         conn.commit()
         conn.close()
-        return True
+        return inserted_any
     except Exception as e:
-        print(f"Error processing: {e}")
+        print(f"Error parsing: {e}")
         return False
 
-# ================= هندلرهای ربات =================
-async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= هندلرهای ارسال دسته‌ای =================
+async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
+    global TOTAL_PROCESSED_COUNT
+    await asyncio.sleep(2.5)  # ۲.۵ ثانیه وقفه بعد از دریافت آخرین پیام در صف
+    
+    messages = BATCH_STORAGE.pop(chat_id, [])
+    BATCH_TASKS.pop(chat_id, None)
+
+    if not messages:
+        return
+
+    added_in_this_batch = 0
+    for text, msg_id in messages:
+        if process_text_data(text, msg_id):
+            added_in_this_batch += 1
+
+    TOTAL_PROCESSED_COUNT += added_in_this_batch
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"📥 **گزارش پردازش دسته‌ای:**\n"
+            f"🔹 پیام‌های دریافتی در این پارت: {len(messages)}\n"
+            f"✅ بازی‌های جدید و مجزا ثبت‌شده: {added_in_this_batch}\n"
+            f"📊 مجموع کل بازی‌های ثبت‌شده تا الان: {TOTAL_PROCESSED_COUNT}"
+        ),
+        parse_mode="Markdown"
+    )
+
+async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.channel_post or update.message
-    if msg and msg.text:
-        if "𝐏𝐋𝐀𝐘𝐄𝐑𝐒" in msg.text and "𝐖𝐈𝐍" in msg.text:
-            success = process_text_data(msg.text, msg.message_id)
-            if success:
-                print(f"Event ثبت شد: شناسه {msg.message_id}")
+    if not msg or not msg.text:
+        return
+
+    if "𝐏𝐋𝐀𝐘𝐄𝐑𝐒" in msg.text and "𝐖𝐈𝐍" in msg.text:
+        chat_id = msg.chat_id
+        if chat_id not in BATCH_STORAGE:
+            BATCH_STORAGE[chat_id] = []
+
+        BATCH_STORAGE[chat_id].append((msg.text, msg.message_id))
+
+        # ریست کردن تایمر برای تجمیع فورواردهای ۱۰۰ تایی
+        if chat_id in BATCH_TASKS:
+            BATCH_TASKS[chat_id].cancel()
+
+        BATCH_TASKS[chat_id] = asyncio.create_task(flush_batch(chat_id, context))
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "سلام! ربات تحلیل آمار مافیا آماده است.\n"
-        "برای دیدن گزارش دستور /report را ارسال کنید."
+        "سلام! سیستم دریافت اطلاعات هوشمند مافیا آماده است.\n\n"
+        "می‌توانید پیام‌ها را به صورت تک‌تک یا ۱۰۰ تا ۱۰۰ تا فوروارد کنید.\n"
+        "سیستم به صورت خودکار پیام‌های هم‌زمان را دسته‌بندی و ذخیره می‌کند.\n"
+        "برای خروجی گرفتن دستور /report را ارسال نمایید."
     )
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('mafia_stats.db')
     c = conn.cursor()
 
-    # فیلتر بازیکنان بالای ۳۰ بازی
     c.execute('''
         SELECT 
             p.name,
@@ -238,12 +296,11 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == '__main__':
     init_db()
-    print("ربات با موفقیت فعال شد و منتظر دریافت پیام‌هاست...")
+    print("ربات فعال شد و آماده دریافت دسته‌ای پیام‌هاست...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("report", report_command))
-    # دریافت و پردازش خودکار پیام‌های ارسال شده در کانال یا پی‌وی
-    app.add_handler(MessageHandler(filters.ALL, channel_post_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_incoming_messages))
 
     app.run_polling()
