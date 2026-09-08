@@ -3,6 +3,7 @@ import re
 import hashlib
 import sqlite3
 import asyncio
+import logging
 import unicodedata
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -12,6 +13,9 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
+
+# خاموش کردن لاگ‌های اخطار فازی
+logging.getLogger('fuzzywuzzy').setLevel(logging.ERROR)
 
 BOT_TOKEN = '8936060141:AAHD7N56eK7FtIq_FBy8E1txGNKkV2lWQjI'
 
@@ -31,11 +35,10 @@ def normalize_text(text):
 
 # ================= دیتابیس =================
 def init_db():
-    conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
     c.execute('PRAGMA journal_mode=WAL;')
     
-    # جدول بازیکنان
     c.execute('''
         CREATE TABLE IF NOT EXISTS players (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,14 +46,12 @@ def init_db():
         )
     ''')
     
-    # جدول ثبت هش بازی‌ها برای جلوگیری از تکرار مو به مو
     c.execute('''
         CREATE TABLE IF NOT EXISTS processed_games (
             game_hash TEXT PRIMARY KEY
         )
     ''')
 
-    # جدول ثبت نتایج سایدها
     c.execute('''
         CREATE TABLE IF NOT EXISTS matches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,7 +92,7 @@ def get_or_create_player(cursor, raw_name):
     row = cursor.fetchone()
     return row[0], clean_name
 
-# ================= تشخیص نقش و ساید =================
+# ================= تشخیص ساید و نقش‌ها =================
 def detect_side(scenario, role):
     sc = scenario.lower().strip()
     ro = role.lower().strip()
@@ -130,17 +131,15 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= استخراج و اعتبارسنجی پیام =================
+# ================= استخراج اطلاعات و رد تکراری مو به مو =================
 def process_text_data(raw_text, fallback_id):
     try:
-        # ایجاد اثر انگشت دقیق از متن کامل برای فیلتر موارد کاملاً مو به مو
         cleaned_raw = "".join(raw_text.split())
         exact_game_hash = hashlib.md5(cleaned_raw.encode('utf-8')).hexdigest()
 
-        conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
+        conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
         c = conn.cursor()
 
-        # اگر این پیام عیناً قبلاً ثبت شده باشد، بلافاصله رد می‌شود
         c.execute("SELECT 1 FROM processed_games WHERE game_hash = ?", (exact_game_hash,))
         if c.fetchone():
             conn.close()
@@ -190,7 +189,6 @@ def process_text_data(raw_text, fallback_id):
             clean_line = re.sub(r'[👈👉].*$', '', clean_line).strip()
             clean_line = re.sub(r'\(.*?\)', '', clean_line).strip()
 
-            # تفکیک دقیق نام انگلیسی و نقش فارسی
             lang_split = re.search(r'^([a-zA-Z0-9\.\s_-]+)([\u0600-\u06FF\s].*)$', clean_line)
             if lang_split:
                 name = lang_split.group(1).strip()
@@ -224,7 +222,6 @@ def process_text_data(raw_text, fallback_id):
             inserted_any = True
 
         if inserted_any:
-            # ثبت قطعی هش پیام به عنوان بازی بررسی شده
             c.execute("INSERT OR IGNORE INTO processed_games (game_hash) VALUES (?)", (exact_game_hash,))
 
         conn.commit()
@@ -235,7 +232,7 @@ def process_text_data(raw_text, fallback_id):
         print(f"Error parsing event: {e}")
         return False
 
-# ================= ساخت خروجی PDF =================
+# ================= ساخت فایل PDF =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia_Leaderboard.pdf"):
     doc = SimpleDocTemplate(
         filename,
@@ -276,7 +273,7 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
     )
 
     elements.append(Paragraph("<b>CAFE MAFIA STATISTICAL REPORT</b>", title_style))
-    elements.append(Paragraph("Official Performance & Win Rate (Minimum 10 Games)", subtitle_style))
+    elements.append(Paragraph("Official Leaderboard (Minimum 10 Games)", subtitle_style))
 
     table_data = [["Rank", "Player", "Matches", "Win Rate", "Mafia Record", "Citizen Record"]]
     for idx, row in enumerate(results, 1):
@@ -337,7 +334,7 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
     doc.build(elements)
     return filename
 
-# ================= ارسال ایمن پیام‌های طولانی =================
+# ================= ارسال پیام‌های طولانی =================
 async def send_large_text(update_or_chat_id, text, context):
     max_len = 3800
     lines = text.split('\n')
@@ -374,8 +371,7 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
     TOTAL_PROCESSED_COUNT += added
 
-    # استعلام تعداد کل بازی‌های متمایز موجود در دیتابیس
-    conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM processed_games")
     all_stored_games = c.fetchone()[0]
@@ -385,11 +381,11 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                f"📥 **گزارش پردازش و به‌روزرسانی دیتابیس:**\n"
-                f"🔹 پیام‌های بررسی‌شده در این نوبت: {len(messages)}\n"
+                f"📥 **گزارش پردازش دسته‌ای:**\n"
+                f"🔹 پیام‌های بررسی‌شده: {len(messages)}\n"
                 f"✅ بازی‌های جدید اضافه شده: {added}\n"
                 f"🔁 بازی‌های تکراری رد شده (مو به مو یکسان): {len(messages) - added}\n"
-                f"📊 مجموع کل بازی‌های ثبت‌شده در سیستم: {all_stored_games}"
+                f"📊 مجموع کل بازی‌های ثبت‌شده: {all_stored_games}"
             ),
             parse_mode="Markdown"
         )
@@ -420,18 +416,13 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
         BATCH_TASKS[chat_id] = asyncio.create_task(flush_batch(chat_id, context))
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "سلام! سیستم دریافت اطلاعات مافیا فعال است.\n"
-        "پیام‌های بازی را فوروارد کنید؛ موارد تکراریِ مو به مو حذف شده و بقیه به دیتابیس افزوده می‌شوند.\n"
-        "برای دریافت گزارش متنی و PDF دستور /report را بفرستید."
-    )
+    await update.message.reply_text("ربات آماده دریافت است! پیام‌ها را فوروارد کنید و با /report آمار بگیرید.")
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with DB_LOCK:
-        conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
+        conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
         c = conn.cursor()
 
-        # شرط حداقل ۱۰ بازی
         c.execute('''
             SELECT 
                 p.name,
@@ -485,7 +476,6 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await send_large_text(update, report, context)
 
-    # ایجاد و ارسال فایل سند PDF
     pdf_path = generate_pdf_report(results, mafia_leaders, citizen_leaders)
     try:
         with open(pdf_path, 'rb') as pdf_file:
@@ -498,10 +488,14 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Error sending PDF: {e}")
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # جلوگیری از بسته شدن برنامه در هنگام قطعی موقت فیلترشکن
+    logging.warning(f"شبکه با اختلال موقت مواجه شد: {context.error}")
+
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات فعال شد و آماده پردازش و تجمیع داده‌هاست...")
+    print("ربات با دیتابیس نو و رفع کامل خطای شبکه فعال شد...")
     
     app = (
         ApplicationBuilder()
@@ -512,6 +506,7 @@ if __name__ == '__main__':
         .build()
     )
     
+    app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_incoming_messages))
