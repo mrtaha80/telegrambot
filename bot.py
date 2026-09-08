@@ -8,7 +8,7 @@ import unicodedata
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
-from fuzzywuzzy import process
+from fuzzywuzzy import fuzz
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -24,14 +24,21 @@ BATCH_TASKS = {}
 TOTAL_PROCESSED_COUNT = 0
 DB_LOCK = asyncio.Lock()
 
-def normalize_text(text):
+# پاکسازی عمیق تمام کاراکترهای نامرئی و علائم سیت
+def deep_clean_line(text):
     if not text:
         return ""
+    # حذف کاراکترهای مخفی و فرمت‌بندی دوطرفه یونیکد (RTL/LTR و فاصله‌های مجازی)
+    invisible_chars = ['\u200b', '\u200c', '\u200d', '\u200e', '\u200f', '\ufeff', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e']
+    for ch in invisible_chars:
+        text = text.replace(ch, ' ')
+    
     text = unicodedata.normalize('NFKD', text)
-    persian_nums = '۰۱۲۳۴۵۶۷۸۹'
-    for i, p in enumerate(persian_nums):
-        text = text.replace(p, str(i))
-    return text
+    
+    # حذف کامل اعداد دایره‌ای، عددهای ساده، ایموجی‌ها و علامت‌ها از شروع خط تا رسیدن به اولین حرف انگلیسی/فارسی
+    # کاراکترهای یونیکد سیت: ➊-➓ و ❶-⓫ و اعداد 0-9 و ۰-۹
+    cleaned = re.sub(r'^[^\w\u0600-\u06FF]*[\d\u2776-\u277F\u2780-\u2793\u2460-\u2473]+[^\w\u0600-\u06FF]*', '', text).strip()
+    return cleaned
 
 # ================= دیتابیس =================
 def init_db():
@@ -69,30 +76,43 @@ def init_db():
     conn.close()
 
 def get_or_create_player(cursor, raw_name):
+    # نرمال‌سازی نام
     clean_name = raw_name.strip().lower()
     clean_name = re.sub(r'[\.\-_:]', ' ', clean_name)
     clean_name = " ".join(clean_name.split())
 
-    if not clean_name or len(clean_name) < 1:
+    # فیلتر اسامی غیرمجاز (ایموجی، اعداد خالی، کمتر از ۲ حرف و گاد)
+    if not clean_name or len(clean_name) < 2 or clean_name.isdigit() or clean_name == 'god':
+        return None, None
+    
+    # جلوگیری قطعی از ورود کاراکترهای تک‌نمادی سیت
+    if not re.search(r'[a-zA-Z\u0600-\u06FF]', clean_name):
         return None, None
 
     cursor.execute("SELECT id, name FROM players")
     existing_players = cursor.fetchall()
     
     if existing_players:
-        names = [p[1] for p in existing_players]
-        best_match, score = process.extractOne(clean_name, names)
-        if clean_name == best_match or (score >= 90 and abs(len(clean_name) - len(best_match)) <= 2):
-            for p in existing_players:
-                if p[1] == best_match:
-                    return p[0], p[1]
+        for pid, existing_name in existing_players:
+            # ۱. تطبیق کامل
+            if clean_name == existing_name:
+                return pid, existing_name
+            
+            # ۲. تطبیق هوشمند برای رفع اشتباهات تایپی (مانند homan و hooman)
+            # استفاده از نسبت فازی و بررسی فاصله طولی
+            ratio = fuzz.ratio(clean_name, existing_name)
+            len_diff = abs(len(clean_name) - len(existing_name))
+            
+            # اگر اختلاف فقط ۱ الی ۲ حرف باشد و شباهت بالای ۸۲٪ باشد
+            if ratio >= 82 and len_diff <= 2:
+                return pid, existing_name
 
     cursor.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (clean_name,))
     cursor.execute("SELECT id FROM players WHERE name = ?", (clean_name,))
     row = cursor.fetchone()
     return row[0], clean_name
 
-# ================= تشخیص ساید و نقش‌ها =================
+# ================= تشخیص نقش و ساید =================
 def detect_side(scenario, role):
     sc = scenario.lower().strip()
     ro = role.lower().strip()
@@ -131,7 +151,7 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= پردازش اطلاعات =================
+# ================= استخراج دقیق اطلاعات =================
 def process_text_data(raw_text, fallback_id):
     try:
         cleaned_raw = "".join(raw_text.split())
@@ -145,11 +165,9 @@ def process_text_data(raw_text, fallback_id):
             conn.close()
             return False
 
-        text = normalize_text(raw_text)
-
-        scenario_match = re.search(r'(?:scenario|سناریو)\s*[:•\-_]\s*([^\n\r]+)', text, re.IGNORECASE)
-        win_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_]\s*([^\n\r]+)', text, re.IGNORECASE)
-        event_match = re.search(r'(?:event|ایونت)\s*[:#•\-_ ]*([0-9]+)', text, re.IGNORECASE)
+        scenario_match = re.search(r'(?:scenario|سناریو)\s*[:•\-_]\s*([^\n\r]+)', raw_text, re.IGNORECASE)
+        win_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_]\s*([^\n\r]+)', raw_text, re.IGNORECASE)
+        event_match = re.search(r'(?:event|ایونت)\s*[:#•\-_ ]*([0-9]+)', raw_text, re.IGNORECASE)
 
         if not scenario_match or not win_match:
             conn.close()
@@ -169,7 +187,7 @@ def process_text_data(raw_text, fallback_id):
             conn.close()
             return False
 
-        players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|$)', text, re.IGNORECASE)
+        players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|$)', raw_text, re.IGNORECASE)
         if not players_match:
             conn.close()
             return False
@@ -182,13 +200,15 @@ def process_text_data(raw_text, fallback_id):
             if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯']):
                 continue
 
-            clean_line = re.sub(r'^[^a-zA-Z\u0600-\u06FF]*[0-9➊-➓]+[\s\:\.\-\/\•]*', '', line).strip()
+            # پاکسازی خط و حذف کاراکترهای سیت و مخفی
+            clean_line = deep_clean_line(line)
             if not clean_line:
                 continue
 
             clean_line = re.sub(r'[👈👉].*$', '', clean_line).strip()
             clean_line = re.sub(r'\(.*?\)', '', clean_line).strip()
 
+            # تفکیک نام انگلیسی و نقش فارسی
             lang_split = re.search(r'^([a-zA-Z0-9\.\s_-]+)([\u0600-\u06FF\s].*)$', clean_line)
             if lang_split:
                 name = lang_split.group(1).strip()
@@ -202,7 +222,8 @@ def process_text_data(raw_text, fallback_id):
                     name = clean_line
                     role = "ساده"
 
-            if not name or name.lower() == 'god':
+            # اعتبارسنجی نام
+            if not name or len(name) < 2 or not re.search(r'[a-zA-Z\u0600-\u06FF]', name):
                 continue
 
             side = detect_side(scenario, role)
@@ -232,7 +253,7 @@ def process_text_data(raw_text, fallback_id):
         print(f"Error parsing event: {e}")
         return False
 
-# ================= ساخت PDF =================
+# ================= ساخت فایل PDF =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia_Leaderboard.pdf"):
     doc = SimpleDocTemplate(
         filename,
@@ -385,7 +406,7 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
                 f"🔹 پیام‌های بررسی‌شده: {len(messages)}\n"
                 f"✅ بازی‌های جدید اضافه شده: {added}\n"
                 f"🔁 بازی‌های تکراری رد شده (مو به مو یکسان): {len(messages) - added}\n"
-                f"📊 مجموع کل بازی‌های ثبت‌شده: {all_stored_games}"
+                f"📊 مجموع کل بازی‌های ثبت‌شده در دیتابیس: {all_stored_games}"
             ),
             parse_mode="Markdown"
         )
@@ -401,7 +422,7 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
     if not raw_content:
         return
 
-    norm_content = normalize_text(raw_content).lower()
+    norm_content = raw_content.lower()
     
     if any(k in norm_content for k in ['player', 'بازیکن', 'سیت', 'ساده', 'مافیا']) and any(w in norm_content for w in ['win', 'برد', 'شهروند', 'مافیا']):
         chat_id = msg.chat_id
@@ -494,9 +515,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با ظرفیت اتصال بالا (Pool Size 100) فعال شد...")
+    print("ربات با فیلتر دقیق سیت و پاکسازی عمیق یونیکد فعال شد...")
     
-    # تنظیم ابزار مدیریت شبکه با پشتیبانی از حجم بالای اتصال موازی
     custom_request = HTTPXRequest(
         connection_pool_size=100,
         pool_timeout=60.0,
