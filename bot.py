@@ -19,11 +19,10 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 from fuzzywuzzy import fuzz
 
-# کتابخانه‌های پردازش تصویر و OCR
+# پردازش تصویر و OCR
 from PIL import Image, ImageEnhance, ImageFilter
 try:
     import pytesseract
-    # بررسی مسیر پیش‌فرض Tesseract در ویندوز
     default_tess_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
     if os.path.exists(default_tess_path):
         pytesseract.pytesseract.tesseract_cmd = default_tess_path
@@ -45,7 +44,11 @@ BATCH_TASKS = {}
 TOTAL_PROCESSED_COUNT = 0
 DB_LOCK = asyncio.Lock()
 
+# مراحل مکالمه
 SEARCH_STATE = 1
+LINK_PROFILE_STATE = 2
+ADD_CHANNEL_STATE = 3
+
 SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯"
 
 # اسامی فیلترشده
@@ -81,20 +84,14 @@ def make_bar(percent, length=8):
     filled = int(round(length * (percent / 100.0)))
     return "▰" * filled + "▱" * (length - filled)
 
-# ================= ماژول پردازش و خواندن تصویر (OCR) =================
 def extract_roles_from_image(image_bytes):
     if not OCR_AVAILABLE:
         return {}
-
     try:
-        image = Image.open(io.BytesIO(image_bytes))
-        # پیش‌پردازش برای خوانایی بهتر تصویر
-        image = image.convert('L')
+        image = Image.open(io.BytesIO(image_bytes)).convert('L')
         enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(2.0)
-        image = image.filter(ImageFilter.SHARPEN)
+        image = enhancer.enhance(2.0).filter(ImageFilter.SHARPEN)
 
-        # اجرای OCR با زبان فارسی و انگلیسی
         try:
             text = pytesseract.image_to_string(image, lang='fas+eng')
         except Exception:
@@ -107,38 +104,60 @@ def extract_roles_from_image(image_bytes):
             line = line.strip()
             if not line:
                 continue
-
-            # پیدا کردن سیت و نقش مقابل آن (مانند 1: پدرخوانده یا 1 - don)
             seat_match = re.search(r'(?:^|[^\d])([1-9]|10)[\s\.\:\-\/•]*(.+)$', line)
             if seat_match:
                 seat_num = int(seat_match.group(1))
-                role_candidate = seat_match.group(2).strip()
-                # پاکسازی نقش
-                role_clean = re.sub(r'[\(\)\[\]👈👉]', '', role_candidate).strip()
-                if len(role_clean) >= 2:
-                    roles_by_seat[seat_num] = role_clean
+                role_candidate = re.sub(r'[\(\)\[\]👈👉]', '', seat_match.group(2)).strip()
+                if len(role_candidate) >= 2:
+                    roles_by_seat[seat_num] = role_candidate
 
         return roles_by_seat
     except Exception as e:
         print(f"Error during OCR extraction: {e}")
         return {}
 
-# ================= دیتابیس و ادغام هوشمند =================
+# ================= ساختار دیتابیس =================
 def init_db():
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
     c.execute('PRAGMA journal_mode=WAL;')
-    
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE COLLATE NOCASE
+        )
+    ''')
+
+    c.execute("INSERT OR IGNORE INTO channels (name) VALUES ('پیش‌فرض (اصلی)')")
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_active_channel (
+            telegram_user_id INTEGER PRIMARY KEY,
+            channel_id INTEGER,
+            FOREIGN KEY(channel_id) REFERENCES channels(id)
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_linked_players (
+            telegram_user_id INTEGER PRIMARY KEY,
+            player_name TEXT COLLATE NOCASE
+        )
+    ''')
+
     c.execute('''
         CREATE TABLE IF NOT EXISTS players (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT UNIQUE COLLATE NOCASE
         )
     ''')
-    
+
     c.execute('''
         CREATE TABLE IF NOT EXISTS processed_games (
-            game_signature TEXT PRIMARY KEY
+            game_signature TEXT,
+            channel_id INTEGER DEFAULT 1,
+            PRIMARY KEY (game_signature, channel_id)
         )
     ''')
 
@@ -146,43 +165,42 @@ def init_db():
         CREATE TABLE IF NOT EXISTS matches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             player_id INTEGER,
+            channel_id INTEGER DEFAULT 1,
             game_signature TEXT,
             event_id TEXT,
             scenario TEXT,
             side TEXT,
             is_win INTEGER,
-            UNIQUE(player_id, game_signature),
-            FOREIGN KEY(player_id) REFERENCES players(id)
+            UNIQUE(player_id, game_signature, channel_id),
+            FOREIGN KEY(player_id) REFERENCES players(id),
+            FOREIGN KEY(channel_id) REFERENCES channels(id)
         )
     ''')
 
-    # ۱. ادغام داده‌ها در حساب omid
+    # ادغام اطلاعات در omid
     c.execute("INSERT OR IGNORE INTO players (name) VALUES ('omid')")
     c.execute("SELECT id FROM players WHERE LOWER(name) = 'omid'")
     omid_row = c.fetchone()
-    
     if omid_row:
         omid_id = omid_row[0]
         aliases_to_merge = list(PLAYER_ALIASES.keys())
         alias_placeholders = ','.join(['?'] * len(aliases_to_merge))
-        
         c.execute(f'''
             SELECT id FROM players 
             WHERE LOWER(name) IN ({alias_placeholders})
         ''', aliases_to_merge)
         alias_players = c.fetchall()
-        
+
         for (a_id,) in alias_players:
             c.execute('''
                 UPDATE OR IGNORE matches 
                 SET player_id = ? 
                 WHERE player_id = ?
             ''', (omid_id, a_id))
-            
             c.execute("DELETE FROM matches WHERE player_id = ?", (a_id,))
             c.execute("DELETE FROM players WHERE id = ?", (a_id,))
 
-    # ۲. حذف مطلق داده‌های اسامی فیلتر شده
+    # حذف اسامی فیلتر شده
     placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
     c.execute(f'''
         DELETE FROM matches 
@@ -190,13 +208,25 @@ def init_db():
             SELECT id FROM players WHERE LOWER(name) IN ({placeholders})
         )
     ''', list(EXCLUDED_PLAYERS))
-    
     c.execute(f'''
         DELETE FROM players WHERE LOWER(name) IN ({placeholders})
     ''', list(EXCLUDED_PLAYERS))
 
     conn.commit()
     conn.close()
+
+def get_user_channel(c, user_id):
+    c.execute("SELECT channel_id FROM user_active_channel WHERE telegram_user_id = ?", (user_id,))
+    row = c.fetchone()
+    if row:
+        c.execute("SELECT id, name FROM channels WHERE id = ?", (row[0],))
+        ch = c.fetchone()
+        if ch:
+            return ch[0], ch[1]
+    
+    c.execute("SELECT id, name FROM channels ORDER BY id ASC LIMIT 1")
+    default_ch = c.fetchone()
+    return default_ch[0], default_ch[1]
 
 def get_or_create_player(cursor, raw_name):
     clean_name = raw_name.strip().lower()
@@ -218,12 +248,11 @@ def get_or_create_player(cursor, raw_name):
 
     cursor.execute("SELECT id, LOWER(name) FROM players")
     existing_players = cursor.fetchall()
-    
+
     if existing_players:
         for pid, existing_name in existing_players:
             if clean_name == existing_name:
                 return pid, existing_name
-            
             ratio = fuzz.ratio(clean_name, existing_name)
             len_diff = abs(len(clean_name) - len(existing_name))
             if ratio >= 82 and len_diff <= 2:
@@ -234,7 +263,6 @@ def get_or_create_player(cursor, raw_name):
     row = cursor.fetchone()
     return row[0], clean_name
 
-# ================= تشخیص نقش و ساید =================
 def detect_side(scenario, role):
     sc = scenario.lower().strip()
     ro = role.lower().strip()
@@ -273,8 +301,8 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= استخراج متن و انطباق با تصویر =================
-def process_game_data(raw_text, image_bytes=None, fallback_id="0"):
+# ================= ثبت بازی بر اساس کانال فعال =================
+def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1):
     try:
         norm = normalize_text(raw_text)
 
@@ -304,7 +332,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0"):
         if not winning_side:
             return False
 
-        # استخراج نقش‌ها از روی عکس در صورت وجود تصویر
         roles_from_image = {}
         if image_bytes:
             roles_from_image = extract_roles_from_image(image_bytes)
@@ -322,7 +349,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0"):
             if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯']):
                 continue
 
-            # تشخیص شماره سیت از خط
             seat_find = re.search(r'^[✦\s\/\•\:\.\-]*([0-9]+|[➊-➓]|[❶-⓫])', line)
             current_seat = seat_counter
             if seat_find:
@@ -352,7 +378,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0"):
                     name = clean_line
                     role = "ساده"
 
-            # تطبیق نقش از روی تصویر (اولویت با نقش استخراج‌شده از عکس برای همان سیت)
             if current_seat in roles_from_image:
                 role = roles_from_image[current_seat]
 
@@ -380,13 +405,13 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0"):
             return False
 
         players_fingerprint = "-".join(sorted([f"{p[0]}:{p[1]}" for p in parsed_players]))
-        full_game_identity = f"{event_id}_{scenario.lower()}_{god}_{date}_{time_val}_{winning_side}_{players_fingerprint}"
+        full_game_identity = f"{channel_id}_{event_id}_{scenario.lower()}_{god}_{date}_{time_val}_{winning_side}_{players_fingerprint}"
         game_signature = hashlib.sha256(full_game_identity.encode('utf-8')).hexdigest()
 
         conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
         c = conn.cursor()
 
-        c.execute("SELECT 1 FROM processed_games WHERE game_signature = ?", (game_signature,))
+        c.execute("SELECT 1 FROM processed_games WHERE game_signature = ? AND channel_id = ?", (game_signature, channel_id))
         if c.fetchone():
             conn.close()
             return False
@@ -398,11 +423,11 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0"):
 
             is_win = 1 if side == winning_side else 0
             c.execute('''
-                INSERT OR IGNORE INTO matches (player_id, game_signature, event_id, scenario, side, is_win)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (player_id, game_signature, event_id, scenario, side, is_win))
+                INSERT OR IGNORE INTO matches (player_id, channel_id, game_signature, event_id, scenario, side, is_win)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (player_id, channel_id, game_signature, event_id, scenario, side, is_win))
 
-        c.execute("INSERT OR IGNORE INTO processed_games (game_signature) VALUES (?)", (game_signature,))
+        c.execute("INSERT OR IGNORE INTO processed_games (game_signature, channel_id) VALUES (?, ?)", (game_signature, channel_id))
         conn.commit()
         conn.close()
         return True
@@ -412,7 +437,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0"):
         return False
 
 # ================= ساخت فایل PDF =================
-def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia_Leaderboard.pdf"):
+def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="پیش‌فرض", filename="Mafia_Leaderboard.pdf"):
     doc = SimpleDocTemplate(
         filename,
         pagesize=letter,
@@ -427,11 +452,11 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
     title_style = ParagraphStyle(
         'MainTitle',
         parent=styles['Heading1'],
-        fontSize=22,
-        leading=26,
+        fontSize=20,
+        leading=24,
         textColor=colors.HexColor('#0F172A'),
         alignment=1,
-        spaceAfter=6
+        spaceAfter=4
     )
     subtitle_style = ParagraphStyle(
         'SubTitle',
@@ -439,20 +464,20 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
         fontSize=10,
         textColor=colors.HexColor('#475569'),
         alignment=1,
-        spaceAfter=18
+        spaceAfter=16
     )
     section_style = ParagraphStyle(
         'SectionHeading',
         parent=styles['Heading2'],
-        fontSize=13,
-        leading=16,
+        fontSize=12,
+        leading=15,
         textColor=colors.HexColor('#0F172A'),
-        spaceBefore=14,
+        spaceBefore=12,
         spaceAfter=8
     )
 
-    elements.append(Paragraph("👑 <b>CAFE MAFIA GRAND CHAMPIONSHIP</b> 👑", title_style))
-    elements.append(Paragraph("Official Bayesian Rating System • Enhanced Volume Regularization (Min 18 Games)", subtitle_style))
+    elements.append(Paragraph(f"👑 <b>CAFE MAFIA GRAND CHAMPIONSHIP</b> 👑", title_style))
+    elements.append(Paragraph(f"Channel / League: <b>{channel_name}</b> • Bayesian Volume Regularization", subtitle_style))
 
     table_data = [["Rank", "Player", "Matches", "Bayesian Pts", "Win Rate", "Mafia (W/G)", "Citizen (W/G)"]]
     for idx, p in enumerate(results, 1):
@@ -486,12 +511,12 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
         ('BOTTOMPADDING', (0, 1), (-1, -1), 5),
     ]))
     elements.append(main_table)
-    elements.append(Spacer(1, 15))
+    elements.append(Spacer(1, 14))
 
     elements.append(Paragraph("⚔️ <b>Elite Side Specialists (Minimum 9 Side Games)</b>", section_style))
     top_side_data = [["🔥 Top Mafia Syndicate", "🛡 Top Citizen Alliance"]]
     max_len = max(len(mafia_leaders[:5]), len(citizen_leaders[:5]))
-    
+
     for i in range(max_len):
         m_txt = f"{i+1}. {mafia_leaders[i]['name'].title()} — <b>{mafia_leaders[i]['bayes']:.2f} Pts</b> ({mafia_leaders[i]['wins']}/{mafia_leaders[i]['games']} W)" if i < len(mafia_leaders[:5]) else ""
         c_txt = f"{i+1}. {citizen_leaders[i]['name'].title()} — <b>{citizen_leaders[i]['bayes']:.2f} Pts</b> ({citizen_leaders[i]['wins']}/{citizen_leaders[i]['games']} W)" if i < len(citizen_leaders[:5]) else ""
@@ -515,7 +540,6 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
     doc.build(elements)
     return filename
 
-# ================= ارسال پیام‌های طولانی =================
 async def send_large_text(update_or_chat_id, text, context):
     max_len = 3800
     lines = text.split('\n')
@@ -529,14 +553,16 @@ async def send_large_text(update_or_chat_id, text, context):
             await asyncio.sleep(0.3)
         else:
             current_chunk += line + "\n"
-            
+
     if current_chunk.strip():
         await context.bot.send_message(chat_id=target_chat, text=current_chunk, parse_mode="Markdown")
 
 def get_main_keyboard():
     keyboard = [
         [KeyboardButton("🏆 تالار افتخارات و رتبه‌بندی بیزی (PDF)")],
-        [KeyboardButton("🔍 جستجوی کارت بازیکن"), KeyboardButton("📜 راهنمای رتبه‌بندی")]
+        [KeyboardButton("👤 کارنامه من"), KeyboardButton("🔍 جستجوی کارت بازیکن")],
+        [KeyboardButton("📢 انتخاب / افزودن کانال"), KeyboardButton("🔗 اتصال نام بازی من")],
+        [KeyboardButton("📜 راهنمای رتبه‌بندی")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -544,24 +570,29 @@ def get_main_keyboard():
 async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global TOTAL_PROCESSED_COUNT
     await asyncio.sleep(2.5)
-    
+
     batch_data = BATCH_STORAGE.pop(chat_id, [])
     BATCH_TASKS.pop(chat_id, None)
 
     if not batch_data:
         return
 
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+    c = conn.cursor()
+    ch_id, ch_name = get_user_channel(c, chat_id)
+    conn.close()
+
     added = 0
     async with DB_LOCK:
         for text, img_bytes, msg_id in batch_data:
-            if process_game_data(text, img_bytes, msg_id):
+            if process_game_data(text, img_bytes, msg_id, channel_id=ch_id):
                 added += 1
 
     TOTAL_PROCESSED_COUNT += added
 
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM processed_games")
+    c.execute("SELECT COUNT(*) FROM processed_games WHERE channel_id = ?", (ch_id,))
     all_stored_games = c.fetchone()[0]
     conn.close()
 
@@ -570,17 +601,128 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
             chat_id=chat_id,
             text=(
                 f"⚡️ **بسته با موفقیت آنالیز شد!**\n"
+                f"📍 کانال فعال: `{ch_name}`\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"📥 کل پیام‌های دریافتی: `{len(batch_data)}`\n"
                 f"✨ بازی‌های جدید تایید شده: `{added}`\n"
                 f"🔁 بازی‌های تکراری رد شده: `{len(batch_data) - added}`\n"
-                f"🏛 کل نبردهای ثبت‌شده دیتابیس: `{all_stored_games}`"
+                f"🏛 کل نبردهای این کانال: `{all_stored_games}`"
             ),
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
     except Exception as e:
         print(f"Error sending batch summary: {e}")
+
+async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Hooman, Ebi)*")
+    return SEARCH_STATE
+
+async def link_profile_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔗 **اتصال نام بازیکن در بازی:**\n"
+        "نام انگلیسی خود را که در بازی‌ها ثبت می‌شود وارد کنید:\n"
+        "*(مثال: Omid, Hooman, Taha)*"
+    )
+    return LINK_PROFILE_STATE
+
+async def link_profile_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    player_name = update.message.text.strip().lower()
+    user_id = update.effective_user.id
+
+    if player_name in PLAYER_ALIASES:
+        player_name = PLAYER_ALIASES[player_name]
+
+    if player_name in EXCLUDED_PLAYERS:
+        await update.message.reply_text("❌ این نام مجاز نمی‌باشد.", reply_markup=get_main_keyboard())
+        return ConversationHandler.END
+
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+    c = conn.cursor()
+    c.execute('''
+        INSERT OR REPLACE INTO user_linked_players (telegram_user_id, player_name)
+        VALUES (?, ?)
+    ''', (user_id, player_name))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        f"✅ نام بازی شما با موفقیت روی **{player_name.title()}** ذخیره شد!\n"
+        f"از این پس با زدن دکمه **«👤 کارنامه من»** آمار و رتبه خود را مشاهده خواهید کرد.",
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard()
+    )
+    return ConversationHandler.END
+
+async def channel_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+    c = conn.cursor()
+    c.execute("SELECT id, name FROM channels ORDER BY id ASC")
+    all_channels = c.fetchall()
+    active_id, active_name = get_user_channel(c, update.effective_user.id)
+    conn.close()
+
+    msg = f"📢 **مدیریت کانال‌ها و لیگ‌ها:**\n"
+    msg += f"🔹 کانال فعال فعلی شما: **{active_name}**\n\n"
+    msg += "لیست کانال‌های موجود:\n"
+    for idx, (cid, cname) in enumerate(all_channels, 1):
+        mark = " (فعال)" if cid == active_id else ""
+        msg += f"{idx}. `{cname}`{mark}\n"
+
+    msg += "\nبرای انتخاب کانال موجود یا ساخت کانال جدید، نام کانال را بفرستید:"
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+    return ADD_CHANNEL_STATE
+
+async def channel_save_or_switch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    new_ch_name = update.message.text.strip()
+    user_id = update.effective_user.id
+
+    if len(new_ch_name) < 2:
+        await update.message.reply_text("❌ نام کانال نامعتبر است.", reply_markup=get_main_keyboard())
+        return ConversationHandler.END
+
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO channels (name) VALUES (?)", (new_ch_name,))
+    c.execute("SELECT id FROM channels WHERE LOWER(name) = LOWER(?)", (new_ch_name,))
+    ch_id = c.fetchone()[0]
+
+    c.execute('''
+        INSERT OR REPLACE INTO user_active_channel (telegram_user_id, channel_id)
+        VALUES (?, ?)
+    ''', (user_id, ch_id))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        f"✅ کانال فعال شما به **{new_ch_name}** تغییر یافت.\n"
+        f"تمامی نبردهای جدید و گزارش‌ها مربوط به این کانال خواهد بود.",
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard()
+    )
+    return ConversationHandler.END
+
+async def my_profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+    c = conn.cursor()
+    c.execute("SELECT player_name FROM user_linked_players WHERE telegram_user_id = ?", (user_id,))
+    row = c.fetchone()
+    ch_id, ch_name = get_user_channel(c, user_id)
+    conn.close()
+
+    if not row:
+        await update.message.reply_text(
+            "⚠️ هنوز نام بازی خود را متصل نکرده‌اید!\n"
+            "لطفاً ابتدا روی دکمه **«🔗 اتصال نام بازی من»** بزنید و اسم درون بازی خود را وارد کنید.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    player_name = row[0]
+    await show_player_card(update, player_name, ch_id, ch_name)
 
 async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.channel_post or update.message
@@ -593,9 +735,9 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
     if norm_lower in ["🏆 تالار افتخارات و رتبه‌بندی بیزی (pdf)", "📊 مشاهده رتبه‌بندی بیزی و گزارش (pdf)"]:
         await report_command(update, context)
         return
-    elif norm_lower in ["🔍 جستجوی کارت بازیکن", "🔍 جستجوی آمار بازیکن"]:
-        await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Hooman, Ebi)*")
-        return SEARCH_STATE
+    elif norm_lower == "👤 کارنامه من":
+        await my_profile_handler(update, context)
+        return
     elif norm_lower in ["📜 راهنمای رتبه‌بندی", "❓ راهنما"]:
         await help_command(update, context)
         return
@@ -603,7 +745,6 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
     image_bytes = None
     if msg.photo:
         try:
-            # دانلود تصویر با بالاترین کیفیت
             photo_file = await msg.photo[-1].get_file()
             f_io = io.BytesIO()
             await photo_file.download_to_memory(out=f_io)
@@ -612,11 +753,10 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
             print(f"Error downloading photo: {e}")
 
     norm_content = normalize_text(raw_content).lower()
-    
-    # اگر پیام دارای مشخصات بازی مافیا باشد
+
     if (any(k in norm_content for k in ['player', 'بازیکن', 'سیت', 'ساده', 'مافیا']) and 
         any(w in norm_content for w in ['win', 'برد', 'شهروند', 'مافیا'])) or image_bytes:
-        
+
         chat_id = msg.chat_id
         if chat_id not in BATCH_STORAGE:
             BATCH_STORAGE[chat_id] = []
@@ -628,45 +768,49 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
 
         BATCH_TASKS[chat_id] = asyncio.create_task(flush_batch(chat_id, context))
 
-# ================= پیام استارت و خوش‌آمدگویی =================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name if update.effective_user else "همراه گرامی"
-    
+    user_id = update.effective_user.id
+
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+    c = conn.cursor()
+    ch_id, ch_name = get_user_channel(c, user_id)
+    conn.close()
+
     welcome_text = (
         f"👑 **درود {user_name} عزیز! به سامانه تحلیل و رتبه‌بندی کافه مافیا خوش آمدید.** 👑\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"این ربات مجهز به موتور هوشمند **OCR**، الگوریتم بیزی با ضریب ثبات و سیستم استخراج پیشرفته است.\n\n"
-        f"🌟 **ویژگی‌های اصلی ربات:**\n\n"
-        f"🔹 **اسکن خودکار تصاویر و متن:**\n"
-        f"اگر عکسی همراه با نقش‌ها به ترتیب ۱ تا ۱۰ ارسال شود، ربات تصویر را می‌خواند و خودکار با لیست اسامی تطبیق می‌دهد.\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📍 کانال فعال شما: **{ch_name}**\n\n"
+        f"🌟 **ویژگی‌های سامانه:**\n\n"
+        f"🔹 **پشتیبانی از چند کانال / لیگ مجزا:**\n"
+        f"می‌توانید برای هر کانال دیتابیس جداگانه داشته باشید یا از کانال پیش‌فرض استفاده کنید.\n\n"
+        f"🔹 **پروفایل شخصی خودکار:**\n"
+        f"با زدن «🔗 اتصال نام بازی من»، یک‌بار اسمتان را ثبت کنید تا با زدن «👤 کارنامه من» آمار خود را دریافت کنید.\n\n"
         f"🔹 **الگوریتم بیزی با ضریب ثبات سنگین:**\n"
-        f"ارزش‌گذاری عادلانه تعداد بازی‌ها به نحوی که ثبات در ۱۰۰ و ۲۰۰ بازی پاداش ویژه دریافت کند.\n\n"
-        f"🔹 **پروفایل و شناسنامه بازیکنان:**\n"
-        f"صدور کارت تحلیلی دقیق به همراه نوار پیروزی و رتبه رسمی.\n\n"
-        f"🔹 **گزارش رسمی و صدور PDF:**\n"
-        f"تولید فایل مستند PDF از برترین‌های کل و پنج بازیکن برتر هر ساید.\n\n"
-        f"⚖️ **قوانین:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
-        f"👇 **جهت شروع، از دکمه‌های زیر استفاده کنید:**"
+        f"ثبات در تعداد بازی‌های بالا ارزش‌گذاری می‌شود.\n\n"
+        f"🔹 **موتور OCR تطبیق تصویر:**\n"
+        f"اسکن نقش‌ها از عکس ۱ تا ۱۰ و تطبیق مستقیم با متن.\n\n"
+        f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
+        f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "📜 **راهنمای سیستم و فرمول بیزی:**\n"
+        "📜 **راهنمای جامع سامانه:**\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "⚖️ **فرمول محاسبه امتیاز رتبه‌بندی:**\n"
-        "`Score = Base_Bayes × [1 + 0.18 × log10(Matches / 18 + 1)]`\n\n"
-        "🖼 **نحوه ارسال بازی‌ها با عکس:**\n"
-        "متن ایونت یا عکسی که نقش‌ها از ۱ تا ۱۰ در آن مشخص است را ارسال یا فوروارد کنید؛ ربات تصویر را پردازش و با اسامی ترکیب می‌کند.\n\n"
-        "📌 **حد نصاب‌ها:** حداقل ۱۸ بازی کل و حداقل ۹ بازی در هر ساید."
+        "▫️ **تغییر کانال:** با زدن «📢 انتخاب / افزودن کانال» می‌توانید کانال فعال را تغییر دهید یا کانال جدیدی بسازید.\n"
+        "▫️ **کارنامه شخصی:** با زدن «🔗 اتصال نام بازی من» یک‌بار اسمتان را متصل کنید تا با «👤 کارنامه من» آمار دقیق خود را ببینید.\n"
+        "▫️ **ارسال بازی:** متن و عکس ایونت را فوروارد کنید تا در کانال فعال ثبت شود."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-# ================= گزارش رسمی =================
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     async with DB_LOCK:
         conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
         c = conn.cursor()
+        ch_id, ch_name = get_user_channel(c, user_id)
 
         placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
         c.execute(f'''
@@ -676,10 +820,10 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 AVG(CASE WHEN side = 'Citizen' THEN is_win END) as citizen_win_mean
             FROM matches m
             JOIN players p ON p.id = m.player_id
-            WHERE LOWER(p.name) NOT IN ({placeholders})
-        ''', list(EXCLUDED_PLAYERS))
+            WHERE LOWER(p.name) NOT IN ({placeholders}) AND m.channel_id = ?
+        ''', list(EXCLUDED_PLAYERS) + [ch_id])
         global_stats = c.fetchone()
-        
+
         m_global = global_stats[0] if (global_stats and global_stats[0] is not None) else 0.50
         m_mafia = global_stats[1] if (global_stats and global_stats[1] is not None) else 0.50
         m_citizen = global_stats[2] if (global_stats and global_stats[2] is not None) else 0.50
@@ -695,15 +839,19 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
             FROM players p
             JOIN matches m ON p.id = m.player_id
-            WHERE LOWER(p.name) NOT IN ({placeholders})
+            WHERE LOWER(p.name) NOT IN ({placeholders}) AND m.channel_id = ?
             GROUP BY LOWER(p.name)
             HAVING total_games >= 18
-        ''', list(EXCLUDED_PLAYERS))
+        ''', list(EXCLUDED_PLAYERS) + [ch_id])
         rows = c.fetchall()
         conn.close()
 
     if not rows:
-        await update.message.reply_text("هنوز بازیکنی به حد نصاب حداقل ۱۸ بازی نرسیده است.", reply_markup=get_main_keyboard())
+        await update.message.reply_text(
+            f"هنوز در کانال **{ch_name}** بازیکنی به حد نصاب حداقل ۱۸ بازی نرسیده است.",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard()
+        )
         return
 
     C_GLOBAL = 12.0
@@ -716,7 +864,6 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for row in rows:
         name, total_g, total_w, m_games, m_wins, c_games, c_wins = row
-        
         raw_win = (total_w * 100.0 / total_g)
         base_bayes = ((total_w + (C_GLOBAL * m_global)) / (total_g + C_GLOBAL)) * 100.0
         vol_boost = 1.0 + (VOLUME_POWER * math.log10((total_g / 18.0) + 1.0))
@@ -765,7 +912,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mafia_candidates.sort(key=lambda x: (x['bayes'], x['games']), reverse=True)
     citizen_candidates.sort(key=lambda x: (x['bayes'], x['games']), reverse=True)
 
-    report = "👑 **جدول برترین‌های کافه مافیا (رتبه‌بندی بیزی با ضریب استقامت)** 👑\n"
+    report = f"👑 **جدول برترین‌های لیگ: {ch_name}** 👑\n"
     report += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
     for idx, p in enumerate(processed_list, 1):
@@ -790,7 +937,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report += f"🔪 مافیا: `{m_rate}%` ({p['m_wins']}/{p['m_games']}) | 🛡 شهر: `{c_rate}%` ({p['c_wins']}/{p['c_games']})\n"
         report += "──────────────────────────\n"
 
-    report += "\n🔥 **۵ شکارچی برتر ساید مافیا (حداقل ۹ بازی):**\n"
+    report += "\n🔥 **۵ شکارچی برتر ساید مافیا:**\n"
     if mafia_candidates:
         medals = ["👑", "🩸", "💀", "🗡", "🎯"]
         for r, m in enumerate(mafia_candidates[:5], 1):
@@ -798,7 +945,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         report += "بازیکنی با حداقل ۹ بازی مافیا یافت نشد.\n"
 
-    report += "\n🛡 **۵ قهرمان برتر ساید شهروند (حداقل ۹ بازی):**\n"
+    report += "\n🛡 **۵ قهرمان برتر ساید شهروند:**\n"
     if citizen_candidates:
         shields = ["🌟", "💎", "✨", "🛡", "⚜️"]
         for r, c_item in enumerate(citizen_candidates[:5], 1):
@@ -808,33 +955,27 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await send_large_text(update, report, context)
 
-    pdf_path = generate_pdf_report(processed_list, mafia_candidates, citizen_candidates)
+    pdf_path = generate_pdf_report(processed_list, mafia_candidates, citizen_candidates, channel_name=ch_name)
     try:
         with open(pdf_path, 'rb') as pdf_file:
             await context.bot.send_document(
                 chat_id=update.effective_chat.id,
                 document=pdf_file,
-                filename="CafeMafia_Official_Leaderboard.pdf",
-                caption="📜 **نسخه رسمی و تفکیکی تالار افتخارات (PDF مستند)**",
+                filename=f"CafeMafia_{ch_name}_Leaderboard.pdf",
+                caption=f"📜 **نسخه رسمی تالار افتخارات ({ch_name})**",
                 reply_markup=get_main_keyboard()
             )
     except Exception as e:
         print(f"Error sending PDF: {e}")
 
-# ================= سرچ اختصاصی بازیکن =================
-async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔎 **نام بازیکن مورد نظر را وارد کنید:**")
-    return SEARCH_STATE
-
-async def search_perform(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip().lower()
-    
+async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name: str):
+    query = query_name.strip().lower()
     if query in PLAYER_ALIASES:
         query = PLAYER_ALIASES[query]
 
     if query in EXCLUDED_PLAYERS:
         await update.message.reply_text(f"❌ بازیکنی با نام «{query}» پیدا نشد.", reply_markup=get_main_keyboard())
-        return ConversationHandler.END
+        return
 
     async with DB_LOCK:
         conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
@@ -844,8 +985,8 @@ async def search_perform(update: Update, context: ContextTypes.DEFAULT_TYPE):
         c.execute(f'''
             SELECT AVG(is_win) FROM matches m
             JOIN players p ON p.id = m.player_id
-            WHERE LOWER(p.name) NOT IN ({placeholders})
-        ''', list(EXCLUDED_PLAYERS))
+            WHERE LOWER(p.name) NOT IN ({placeholders}) AND m.channel_id = ?
+        ''', list(EXCLUDED_PLAYERS) + [ch_id])
         global_avg_row = c.fetchone()
         m_global = global_avg_row[0] if (global_avg_row and global_avg_row[0] is not None) else 0.50
 
@@ -861,15 +1002,15 @@ async def search_perform(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
             FROM players p
             JOIN matches m ON p.id = m.player_id
-            WHERE LOWER(p.name) NOT IN ({placeholders})
+            WHERE LOWER(p.name) NOT IN ({placeholders}) AND m.channel_id = ?
             GROUP BY LOWER(p.name)
-        ''', list(EXCLUDED_PLAYERS))
+        ''', list(EXCLUDED_PLAYERS) + [ch_id])
         all_players_raw = c.fetchall()
         conn.close()
 
     if not all_players_raw:
-        await update.message.reply_text("دیتابیس خالی است.", reply_markup=get_main_keyboard())
-        return ConversationHandler.END
+        await update.message.reply_text(f"دیتابیس کانال **{ch_name}** هنوز داده‌ای ندارد.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+        return
 
     C_GLOBAL = 12.0
     VOLUME_POWER = 0.18
@@ -912,8 +1053,8 @@ async def search_perform(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rank = idx
 
     if not matched_player:
-        await update.message.reply_text(f"❌ بازیکنی با نام «{query}» در تالار افتخارات پیدا نشد.", reply_markup=get_main_keyboard())
-        return ConversationHandler.END
+        await update.message.reply_text(f"❌ بازیکنی با نام «{query}» در کانال **{ch_name}** پیدا نشد.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+        return
 
     p = matched_player
     m_rate = (p['m_wins'] * 100 // p['m_games']) if p['m_games'] > 0 else 0
@@ -923,9 +1064,10 @@ async def search_perform(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     profile_text = (
         f"🎖 **کارت شناسنامه آماری بازیکن** 🎖\n"
+        f"📍 کانال: **{ch_name}**\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 **نام:** `{p['name'].title()}`\n"
-        f"👑 **جایگاه در لیگ:** `#{rank}` (از میان {len(all_players_calculated)} بازیکن)\n"
+        f"👑 **جایگاه در این کانال:** `#{rank}` (از میان {len(all_players_calculated)} بازیکن)\n"
         f"⭐️ **امتیاز نهایی:** `{p['bayes_score']:.2f}`\n"
         f"⚔️ **تعداد کل نبردها:** `{p['total_games']}` بازی\n"
         f"🏆 **وین‌ریت قطعی:** `{p['raw_win']:.1f}%` ({p['total_wins']} برد)\n"
@@ -940,20 +1082,31 @@ async def search_perform(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(profile_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+
+async def search_perform(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.strip().lower()
+    user_id = update.effective_user.id
+
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+    c = conn.cursor()
+    ch_id, ch_name = get_user_channel(c, user_id)
+    conn.close()
+
+    await show_player_card(update, query, ch_id, ch_name)
     return ConversationHandler.END
 
-async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("جستجو لغو شد.", reply_markup=get_main_keyboard())
+async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("عملیات لغو شد.", reply_markup=get_main_keyboard())
     return ConversationHandler.END
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logging.warning(f"شبکه با اختلال موقت مواجه شد: {context.error}")
+    logging.warning(f"خطای موقت در ارتباط شبکه: {context.error}")
 
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
     print("ربات با پردازش هوشمند تصویر و متن فعال شد...")
-    
+
     custom_request = HTTPXRequest(
         connection_pool_size=100,
         pool_timeout=60.0,
@@ -961,7 +1114,7 @@ if __name__ == '__main__':
         write_timeout=60.0,
         connect_timeout=60.0
     )
-    
+
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
@@ -969,7 +1122,7 @@ if __name__ == '__main__':
         .get_updates_request(custom_request)
         .build()
     )
-    
+
     search_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^(🔍 جستجوی کارت بازیکن|🔍 جستجوی آمار بازیکن)$"), search_start),
@@ -978,14 +1131,41 @@ if __name__ == '__main__':
         states={
             SEARCH_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_perform)]
         },
-        fallbacks=[CommandHandler("cancel", search_cancel)]
+        fallbacks=[CommandHandler("cancel", cancel_handler)]
+    )
+
+    link_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex("^🔗 اتصال نام بازی من$"), link_profile_start)
+        ],
+        states={
+            LINK_PROFILE_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, link_profile_save)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_handler)]
+    )
+
+    channel_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex("^📢 انتخاب / افزودن کانال$"), channel_menu_handler)
+        ],
+        states={
+            ADD_CHANNEL_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, channel_save_or_switch)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_handler)]
     )
 
     app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("report", report_command))
+
     app.add_handler(search_conv)
+    app.add_handler(link_conv)
+    app.add_handler(channel_conv)
+
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_incoming_messages))
 
-    app.run_polling()
+    try:
+        app.run_polling(drop_pending_updates=True)
+    except KeyboardInterrupt:
+        print("\nربات با درخواست کاربر خاموش شد.")
