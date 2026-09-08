@@ -262,7 +262,7 @@ def process_text_data(raw_text, fallback_id):
         print(f"Error parsing event: {e}")
         return False
 
-# ================= ساخت فایل PDF (رتبه‌بندی بیزی و پاداش تعداد بازی) =================
+# ================= ساخت فایل PDF =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia_Leaderboard.pdf"):
     doc = SimpleDocTemplate(
         filename,
@@ -539,7 +539,6 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         raw_win = (total_w * 100.0 / total_g)
         base_bayes = ((total_w + (C_GLOBAL * m_global)) / (total_g + C_GLOBAL)) * 100.0
-        # اعمال پاداش محسوس برای پایداری در بازی‌های بیشتر
         vol_boost = 1.0 + (0.08 * math.log10((total_g / 18.0) + 1.0))
         bayes_score = base_bayes * vol_boost
 
@@ -584,7 +583,6 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'wins': c_wins
             })
 
-    # مرتب‌سازی مطلق بر پایه نمره نهایی
     processed_list.sort(key=lambda x: (x['bayes_score'], x['total_games']), reverse=True)
     mafia_candidates.sort(key=lambda x: (x['bayes'], x['games']), reverse=True)
     citizen_candidates.sort(key=lambda x: (x['bayes'], x['games']), reverse=True)
@@ -597,7 +595,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report += f"🎖 **رتبه {idx}. {p['name'].title()}**\n"
         report += f"⭐️ **امتیاز نهایی:** {p['bayes_score']:.2f} | 🎮 بازی‌ها: {p['total_games']}\n"
         report += f"🏆 درصد برد واقعی: {p['raw_win']:.1f}%\n"
-        report += f"🔪 مافیا: {m_rate}% ({p['m_wins']}/{p['m_games']}) | 🛡 شهر: {c_rate}% ({p['c_wins']}/{p['c_games'])}\n"
+        report += f"🔪 مافیا: {m_rate}% ({p['m_wins']}/{p['m_games']}) | 🛡 شهر: {c_rate}% ({p['c_wins']}/{p['c_games']})\n"
         report += "─────────────────\n"
 
     report += "\n🔥 **۵ بازیکن برتر ساید مافیا (حداقل ۹ بازی):**\n"
