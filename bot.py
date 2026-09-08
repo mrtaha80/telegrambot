@@ -6,6 +6,7 @@ import sqlite3
 import asyncio
 import logging
 import unicodedata
+import io
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
@@ -17,6 +18,18 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 from fuzzywuzzy import fuzz
+
+# کتابخانه‌های پردازش تصویر و OCR
+from PIL import Image, ImageEnhance, ImageFilter
+try:
+    import pytesseract
+    # بررسی مسیر پیش‌فرض Tesseract در ویندوز
+    default_tess_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    if os.path.exists(default_tess_path):
+        pytesseract.pytesseract.tesseract_cmd = default_tess_path
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -35,7 +48,7 @@ DB_LOCK = asyncio.Lock()
 SEARCH_STATE = 1
 SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯"
 
-# اسامی که به طور کامل از سیستم حذف و فیلتر می‌شوند
+# اسامی فیلترشده
 EXCLUDED_PLAYERS = {'ali', 'sara', 'mohammad', 'mohamad'}
 
 # نگاشت ادغام به نام omid
@@ -67,6 +80,48 @@ def deep_clean_line(text):
 def make_bar(percent, length=8):
     filled = int(round(length * (percent / 100.0)))
     return "▰" * filled + "▱" * (length - filled)
+
+# ================= ماژول پردازش و خواندن تصویر (OCR) =================
+def extract_roles_from_image(image_bytes):
+    if not OCR_AVAILABLE:
+        return {}
+
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        # پیش‌پردازش برای خوانایی بهتر تصویر
+        image = image.convert('L')
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(2.0)
+        image = image.filter(ImageFilter.SHARPEN)
+
+        # اجرای OCR با زبان فارسی و انگلیسی
+        try:
+            text = pytesseract.image_to_string(image, lang='fas+eng')
+        except Exception:
+            text = pytesseract.image_to_string(image)
+
+        text = normalize_text(text)
+        roles_by_seat = {}
+
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            # پیدا کردن سیت و نقش مقابل آن (مانند 1: پدرخوانده یا 1 - don)
+            seat_match = re.search(r'(?:^|[^\d])([1-9]|10)[\s\.\:\-\/•]*(.+)$', line)
+            if seat_match:
+                seat_num = int(seat_match.group(1))
+                role_candidate = seat_match.group(2).strip()
+                # پاکسازی نقش
+                role_clean = re.sub(r'[\(\)\[\]👈👉]', '', role_candidate).strip()
+                if len(role_clean) >= 2:
+                    roles_by_seat[seat_num] = role_clean
+
+        return roles_by_seat
+    except Exception as e:
+        print(f"Error during OCR extraction: {e}")
+        return {}
 
 # ================= دیتابیس و ادغام هوشمند =================
 def init_db():
@@ -218,8 +273,8 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= استخراج اطلاعات =================
-def process_text_data(raw_text, fallback_id):
+# ================= استخراج متن و انطباق با تصویر =================
+def process_game_data(raw_text, image_bytes=None, fallback_id="0"):
     try:
         norm = normalize_text(raw_text)
 
@@ -249,17 +304,33 @@ def process_text_data(raw_text, fallback_id):
         if not winning_side:
             return False
 
+        # استخراج نقش‌ها از روی عکس در صورت وجود تصویر
+        roles_from_image = {}
+        if image_bytes:
+            roles_from_image = extract_roles_from_image(image_bytes)
+
         players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|$)', norm, re.IGNORECASE)
         if not players_match:
             return False
 
         players_block = players_match.group(1)
         parsed_players = []
+        seat_counter = 1
 
         for line in players_block.strip().splitlines():
             line = line.strip()
             if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯']):
                 continue
+
+            # تشخیص شماره سیت از خط
+            seat_find = re.search(r'^[✦\s\/\•\:\.\-]*([0-9]+|[➊-➓]|[❶-⓫])', line)
+            current_seat = seat_counter
+            if seat_find:
+                seat_raw = seat_find.group(1)
+                if seat_raw in SEAT_SYMBOLS:
+                    current_seat = SEAT_SYMBOLS.index(seat_raw) % 10 + 1
+                elif seat_raw.isdigit():
+                    current_seat = int(seat_raw)
 
             clean_line = deep_clean_line(line)
             if not clean_line:
@@ -281,6 +352,10 @@ def process_text_data(raw_text, fallback_id):
                     name = clean_line
                     role = "ساده"
 
+            # تطبیق نقش از روی تصویر (اولویت با نقش استخراج‌شده از عکس برای همان سیت)
+            if current_seat in roles_from_image:
+                role = roles_from_image[current_seat]
+
             if not name or len(name) < 2 or not re.search(r'[a-zA-Z\u0600-\u06FF]', name):
                 continue
 
@@ -292,11 +367,14 @@ def process_text_data(raw_text, fallback_id):
                 name_lower = PLAYER_ALIASES[name_lower]
 
             if name_lower in EXCLUDED_PLAYERS:
+                seat_counter += 1
                 continue
 
             side = detect_side(scenario, role)
             if side != "Independent":
                 parsed_players.append((name_lower, role.lower(), side))
+
+            seat_counter += 1
 
         if len(parsed_players) < 5:
             return False
@@ -380,7 +458,6 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia
     for idx, p in enumerate(results, 1):
         m_rate = (p['m_wins'] * 100 // p['m_games']) if p['m_games'] > 0 else 0
         c_rate = (p['c_wins'] * 100 // p['c_games']) if p['c_games'] > 0 else 0
-
         badge = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else f"#{idx}"
 
         table_data.append([
@@ -468,16 +545,16 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global TOTAL_PROCESSED_COUNT
     await asyncio.sleep(2.5)
     
-    messages = BATCH_STORAGE.pop(chat_id, [])
+    batch_data = BATCH_STORAGE.pop(chat_id, [])
     BATCH_TASKS.pop(chat_id, None)
 
-    if not messages:
+    if not batch_data:
         return
 
     added = 0
     async with DB_LOCK:
-        for text, msg_id in messages:
-            if process_text_data(text, msg_id):
+        for text, img_bytes, msg_id in batch_data:
+            if process_game_data(text, img_bytes, msg_id):
                 added += 1
 
     TOTAL_PROCESSED_COUNT += added
@@ -494,9 +571,9 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
             text=(
                 f"⚡️ **بسته با موفقیت آنالیز شد!**\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"📥 کل پیام‌های دریافتی: `{len(messages)}`\n"
+                f"📥 کل پیام‌های دریافتی: `{len(batch_data)}`\n"
                 f"✨ بازی‌های جدید تایید شده: `{added}`\n"
-                f"🔁 بازی‌های تکراری رد شده: `{len(messages) - added}`\n"
+                f"🔁 بازی‌های تکراری رد شده: `{len(batch_data) - added}`\n"
                 f"🏛 کل نبردهای ثبت‌شده دیتابیس: `{all_stored_games}`"
             ),
             parse_mode="Markdown",
@@ -510,10 +587,7 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
     if not msg:
         return
 
-    raw_content = msg.text or msg.caption
-    if not raw_content:
-        return
-
+    raw_content = msg.text or msg.caption or ""
     norm_lower = raw_content.strip().lower()
 
     if norm_lower in ["🏆 تالار افتخارات و رتبه‌بندی بیزی (pdf)", "📊 مشاهده رتبه‌بندی بیزی و گزارش (pdf)"]:
@@ -526,56 +600,65 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
         await help_command(update, context)
         return
 
+    image_bytes = None
+    if msg.photo:
+        try:
+            # دانلود تصویر با بالاترین کیفیت
+            photo_file = await msg.photo[-1].get_file()
+            f_io = io.BytesIO()
+            await photo_file.download_to_memory(out=f_io)
+            image_bytes = f_io.getvalue()
+        except Exception as e:
+            print(f"Error downloading photo: {e}")
+
     norm_content = normalize_text(raw_content).lower()
     
-    if any(k in norm_content for k in ['player', 'بازیکن', 'سیت', 'ساده', 'مافیا']) and any(w in norm_content for w in ['win', 'برد', 'شهروند', 'مافیا']):
+    # اگر پیام دارای مشخصات بازی مافیا باشد
+    if (any(k in norm_content for k in ['player', 'بازیکن', 'سیت', 'ساده', 'مافیا']) and 
+        any(w in norm_content for w in ['win', 'برد', 'شهروند', 'مافیا'])) or image_bytes:
+        
         chat_id = msg.chat_id
         if chat_id not in BATCH_STORAGE:
             BATCH_STORAGE[chat_id] = []
 
-        BATCH_STORAGE[chat_id].append((raw_content, msg.message_id))
+        BATCH_STORAGE[chat_id].append((raw_content, image_bytes, msg.message_id))
 
         if chat_id in BATCH_TASKS:
             BATCH_TASKS[chat_id].cancel()
 
         BATCH_TASKS[chat_id] = asyncio.create_task(flush_batch(chat_id, context))
 
-# ================= پیام استارت و خوش‌آمدگویی کامل =================
+# ================= پیام استارت و خوش‌آمدگویی =================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name if update.effective_user else "همراه گرامی"
     
     welcome_text = (
         f"👑 **درود {user_name} عزیز! به سامانه تحلیل و رتبه‌بندی کافه مافیا خوش آمدید.** 👑\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"این ربات یک دستیار هوشمند، عادلانه و پیشرفته برای ثبت، آنالیز و رتبه‌بندی دقیق آمار بازی‌های مافیا است.\n\n"
-        f"🌟 **ویژگی‌ها و قابلیت‌های اصلی ربات:**\n\n"
+        f"این ربات مجهز به موتور هوشمند **OCR**، الگوریتم بیزی با ضریب ثبات و سیستم استخراج پیشرفته است.\n\n"
+        f"🌟 **ویژگی‌های اصلی ربات:**\n\n"
+        f"🔹 **اسکن خودکار تصاویر و متن:**\n"
+        f"اگر عکسی همراه با نقش‌ها به ترتیب ۱ تا ۱۰ ارسال شود، ربات تصویر را می‌خواند و خودکار با لیست اسامی تطبیق می‌دهد.\n\n"
         f"🔹 **الگوریتم بیزی با ضریب ثبات سنگین:**\n"
-        f"برخلاف سیستم‌های سنتی که صرفاً درصد برد خام را می‌سنجند، سیستم ما تعداد کل بازی‌ها را ارزش‌گذاری می‌کند؛ بنابراین بازیکنی با ۱۰۰ یا ۲۰۰ بازی زیر سایه شانس مقطعی بازی‌های کم‌تعداد قرار نمی‌گیرد.\n\n"
-        f"🔹 **ثبت خودکار و آنی ایونت‌ها:**\n"
-        f"کافی است متن یا عکس نبردهای برگزارشده را به ربات فوروارد کنید تا مشخصات بازیکنان، نقش‌ها و ساید برنده ذخیره شوند.\n\n"
+        f"ارزش‌گذاری عادلانه تعداد بازی‌ها به نحوی که ثبات در ۱۰۰ و ۲۰۰ بازی پاداش ویژه دریافت کند.\n\n"
         f"🔹 **پروفایل و شناسنامه بازیکنان:**\n"
-        f"با جستجوی نام هر بازیکن، کارنامه تفکیکی (تعداد بازی، برد، درصد پیروزی و رتبه در کل لیگ) همراه با نمودار نواری اختصاصی صادر می‌شود.\n\n"
+        f"صدور کارت تحلیلی دقیق به همراه نوار پیروزی و رتبه رسمی.\n\n"
         f"🔹 **گزارش رسمی و صدور PDF:**\n"
-        f"در هر لحظه می‌توانید جدول رده‌بندی کل و تاپ ۵ هر ساید را در قالب فایل مستند PDF دریافت کنید.\n\n"
-        f"⚖️ **قوانین و حد نصاب‌های رتبه‌بندی:**\n"
-        f"▫️ حداقل **۱۸ بازی** برای ورود به تالار افتخارات کل.\n"
-        f"▫️ حداقل **۹ بازی** در هر ساید برای رقابت در ۵ نفر برتر مافیا یا شهروند.\n\n"
+        f"تولید فایل مستند PDF از برترین‌های کل و پنج بازیکن برتر هر ساید.\n\n"
+        f"⚖️ **قوانین:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 **جهت شروع، از دکمه‌های زیر استفاده کنید:**"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "📜 **ساختار رتبه‌بندی و فرمول بیزی با ضریب حجم:**\n"
+        "📜 **راهنمای سیستم و فرمول بیزی:**\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "⚖️ **چرا تعداد بازی تعیین‌کننده است؟**\n"
-        "حفظ درصد برد بالا در ۲۰۰ مسابقه ارزش آماری به مراتب بیشتری از ۲۰ مسابقه دارد. بنابراین علاوه بر نسبت برد بیزی، یک ضریب تصاعدی روی کل امتیاز اعمال می‌شود:\n"
+        "⚖️ **فرمول محاسبه امتیاز رتبه‌بندی:**\n"
         "`Score = Base_Bayes × [1 + 0.18 × log10(Matches / 18 + 1)]`\n\n"
-        "🎖 **نشان‌های رتبه‌بندی:**\n"
-        "👑 Grandmaster: رتبه ۱ تا ۳ جدول\n"
-        "💎 Master: امتیاز بالای ۶۰ با حجم بازی سنگین\n"
-        "💠 Diamond: بازیکنان باثبات بالا\n\n"
-        "📌 **حداقل شرط ورود به جدول:** ۱۸ بازی کل و ۹ بازی در هر ساید."
+        "🖼 **نحوه ارسال بازی‌ها با عکس:**\n"
+        "متن ایونت یا عکسی که نقش‌ها از ۱ تا ۱۰ در آن مشخص است را ارسال یا فوروارد کنید؛ ربات تصویر را پردازش و با اسامی ترکیب می‌کند.\n\n"
+        "📌 **حد نصاب‌ها:** حداقل ۱۸ بازی کل و حداقل ۹ بازی در هر ساید."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -869,7 +952,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات فعال شد...")
+    print("ربات با پردازش هوشمند تصویر و متن فعال شد...")
     
     custom_request = HTTPXRequest(
         connection_pool_size=100,
