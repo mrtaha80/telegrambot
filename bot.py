@@ -11,11 +11,13 @@ BOT_TOKEN = '8936060141:AAHD7N56eK7FtIq_FBy8E1txGNKkV2lWQjI'
 BATCH_STORAGE = {}
 BATCH_TASKS = {}
 TOTAL_PROCESSED_COUNT = 0
+DB_LOCK = asyncio.Lock()
 
 # ================= راه‌اندازی دیتابیس =================
 def init_db():
-    conn = sqlite3.connect('mafia_stats.db')
+    conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
     c = conn.cursor()
+    c.execute('PRAGMA journal_mode=WAL;')
     c.execute('''
         CREATE TABLE IF NOT EXISTS players (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,7 +51,6 @@ def get_or_create_player(cursor, raw_name):
     if existing_players:
         names = [p[1] for p in existing_players]
         best_match, score = process.extractOne(clean_name, names)
-        # حساسیت تطبیق نام (عدم ادغام نام‌های ترکیبی مثل Reza و Reza Nazari)
         if score >= 88 and abs(len(clean_name) - len(best_match)) <= 2:
             for p in existing_players:
                 if p[1] == best_match:
@@ -65,18 +66,15 @@ def detect_side(scenario, role):
     sc = scenario.lower().strip()
     ro = role.lower().strip()
 
-    # ۱. نقش‌های مستقل (عدم محاسبه در برد و باخت سایدها)
     independents = ['jack', 'جک', 'nostra', 'نوسترا', 'sherlock', 'شرلوک', 'churchill', 'چرچیل']
     if any(ind in ro for ind in independents):
         return "Independent"
 
-    # ۲. مافیاهای پایه و عناوین رئیس
     mafia_roles = [
         'don', 'دن', 'nato', 'ناتو', 'رئیس مافیا', 'رئیس', 'مافیای ساده', 
         'mafia sade', 'mafia', 'مافیا'
     ]
 
-    # ۳. مافیاهای اختصاصی بر اساس سناریو
     if any(s in sc for s in ['takavar', 'تکاور']):
         mafia_roles.extend(['grogangir', 'گروگانگیر', 'گروگان گیر'])
     elif any(s in sc for s in ['bazpors', 'بازپرس']):
@@ -88,10 +86,8 @@ def detect_side(scenario, role):
     elif any(s in sc for s in ['hanibal', 'hannibal', 'هانیبال']):
         mafia_roles.extend(['hanibal', 'hannibal', 'هانیبال', 'saye', 'سایه'])
     elif any(s in sc for s in ['namayande', 'namayandeh', 'نماینده']):
-        # در سناریو نماینده، وکیل شهروند است و یاغی/هکر مافیا هستند
         mafia_roles.extend(['yaghi', 'یاغی', 'hacker', 'هکر'])
     elif any(s in sc for s in ['pishrafte', 'پیشرفته']):
-        # در سناریو پیشرفته، وکیل مافیا است
         mafia_roles.extend(['vakil', 'وکیل', 'terrorist', 'تروریست', 'natasha', 'ناتاشا'])
     elif any(s in sc for s in ['elclassico', 'الکلاسیکو']):
         mafia_roles.extend(['khoan', 'خوان', 'blanco', 'بلانکو', 'pablo', 'scobar', 'پابلو'])
@@ -104,10 +100,9 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= استخراج اطلاعات از متن =================
+# ================= پردازش اطلاعات =================
 def process_text_data(text, fallback_id):
     try:
-        # استخراج فیلدها با پوشش هر دو فرمت پیام‌ها
         event_match = re.search(r'(?:EVENT\s*#|𝐄𝐕𝐄𝐍𝐓\s*•)\s*([0-9]+)', text, re.IGNORECASE)
         scenario_match = re.search(r'(?:Scenario|𝐒𝐂𝐄𝐍𝐀𝐑𝐈𝐎)\s*[:•]\s*([^\n\r]+)', text, re.IGNORECASE)
         win_match = re.search(r'(?:Winner|𝐖𝐈𝐍)\s*[:•]\s*([^\n\r]+)', text, re.IGNORECASE)
@@ -125,11 +120,9 @@ def process_text_data(text, fallback_id):
         time_str = time_match.group(1).strip() if time_match else ""
         god_str = god_match.group(1).strip().lower() if god_match else ""
 
-        # ساخت امضای چند متغیره برای جلوگیری از تداخل ایونت‌های مشابه
         sig_raw = f"{event_id}_{scenario}_{date_str}_{time_str}_{god_str}"
         game_signature = hashlib.md5(sig_raw.encode('utf-8')).hexdigest()
 
-        # تعیین ساید برنده
         winning_side = None
         if 'مافیا' in win_text or 'mafia' in win_text:
             winning_side = "Mafia"
@@ -139,7 +132,6 @@ def process_text_data(text, fallback_id):
         if not winning_side:
             return False
 
-        # استخراج بخش لیست بازیکنان
         players_block = None
         if "PLAYERS" in text:
             players_block = text.split("PLAYERS")[1]
@@ -149,12 +141,11 @@ def process_text_data(text, fallback_id):
         if not players_block:
             return False
 
-        # پایان محدوده بازیکنان با برنده
         for stop_word in ["Winner", "𝐖𝐈𝐍", "🏆"]:
             if stop_word in players_block:
                 players_block = players_block.split(stop_word)[0]
 
-        conn = sqlite3.connect('mafia_stats.db')
+        conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
         c = conn.cursor()
 
         inserted_any = False
@@ -163,21 +154,16 @@ def process_text_data(text, fallback_id):
             if not line or line.startswith('━') or line.startswith('┄'):
                 continue
 
-            # حذف علائم سیت نظیر ❶, ✦➊:, /➊•, 11 و غیره
             clean_line = re.sub(r'^[✦\s\/\•]*[➊-➓0-9۰-۹]+[\s\:\.\-\/\•]*', '', line).strip()
             if not clean_line:
                 continue
 
-            # پاکسازی توضیحات اضافی مثل 👈 و پرانتزها
             clean_line = re.sub(r'👈.*$', '', clean_line).strip()
 
-            # تفکیک نام انگلیسی/فارسی بازیکن از نقش
             tokens = clean_line.split()
             if not tokens:
                 continue
 
-            # جدا کردن نام از نقش (نقش معمولاً در انتهای خط است)
-            # اگر نقش ۲ کلمه‌ای باشد (مثل رئیس مافیا یا مافیای ساده)
             if len(tokens) >= 3 and any(k in " ".join(tokens[-2:]) for k in ['مافیا', 'ساده', 'مافیای ساده', 'رئیس مافیا', 'گودمن']):
                 name = " ".join(tokens[:-2])
                 role = " ".join(tokens[-2:])
@@ -217,7 +203,7 @@ def process_text_data(text, fallback_id):
 # ================= هندلرهای تلگرام =================
 async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global TOTAL_PROCESSED_COUNT
-    await asyncio.sleep(2.0)
+    await asyncio.sleep(2.5)
     
     messages = BATCH_STORAGE.pop(chat_id, [])
     BATCH_TASKS.pop(chat_id, None)
@@ -226,19 +212,21 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
         return
 
     added = 0
-    for text, msg_id in messages:
-        if process_text_data(text, msg_id):
-            added += 1
+    # قفل کردن عملیات دیتابیس برای جلوگیری از خطای database is locked
+    async with DB_LOCK:
+        for text, msg_id in messages:
+            if process_text_data(text, msg_id):
+                added += 1
 
     TOTAL_PROCESSED_COUNT += added
 
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            f"📥 **گزارش ثبت دسته‌ای:**\n"
-            f"🔹 پیام‌های بررسی‌شده در این مرحله: {len(messages)}\n"
-            f"✅ بازی‌های جدید اضافه شده به آمار: {added}\n"
-            f"📊 مجموع کل بازی‌های ثبت‌شده تا اکنون: {TOTAL_PROCESSED_COUNT}"
+            f"📥 **گزارش پردازش دسته‌ای:**\n"
+            f"🔹 تعداد پیام‌های دریافتی: {len(messages)}\n"
+            f"✅ بازی‌های جدید ثبت‌شده: {added}\n"
+            f"📊 مجموع کل بازی‌ها در سیستم: {TOTAL_PROCESSED_COUNT}"
         ),
         parse_mode="Markdown"
     )
@@ -263,36 +251,36 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "سلام! ربات تحلیل بازی‌های مافیا آماده دریافت اطلاعات است.\n\n"
-        "می‌توانید پیام‌ها را تکی یا به صورت دسته‌ای (۱۰۰تایی) فوروارد کنید.\n"
-        "جهت دریافت گزارش عملکرد بازیکنان (با شرط حداقل ۱۰ بازی) دستور /report را ارسال نمایید."
+        "سلام! ربات تحلیل بازی‌های مافیا آماده است.\n"
+        "می‌توانید پیام‌ها را ۱۰۰ تایی فوروارد کنید.\n"
+        "برای مشاهده نتایج از دستور /report استفاده کنید."
     )
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect('mafia_stats.db')
-    c = conn.cursor()
+    async with DB_LOCK:
+        conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
+        c = conn.cursor()
 
-    # شرط دریافت بازیکنان با حداقل ۱۰ بازی
-    c.execute('''
-        SELECT 
-            p.name,
-            COUNT(m.id) as total_games,
-            (SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(m.id)) as overall_win_rate,
-            SUM(CASE WHEN m.side = 'Mafia' THEN 1 ELSE 0 END) as mafia_games,
-            SUM(CASE WHEN m.side = 'Mafia' AND m.is_win = 1 THEN 1 ELSE 0 END) as mafia_wins,
-            SUM(CASE WHEN m.side = 'Citizen' THEN 1 ELSE 0 END) as citizen_games,
-            SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
-        FROM players p
-        JOIN matches m ON p.id = m.player_id
-        GROUP BY p.id
-        HAVING total_games >= 10
-        ORDER BY overall_win_rate DESC
-    ''')
-    results = c.fetchall()
-    conn.close()
+        c.execute('''
+            SELECT 
+                p.name,
+                COUNT(m.id) as total_games,
+                (SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(m.id)) as overall_win_rate,
+                SUM(CASE WHEN m.side = 'Mafia' THEN 1 ELSE 0 END) as mafia_games,
+                SUM(CASE WHEN m.side = 'Mafia' AND m.is_win = 1 THEN 1 ELSE 0 END) as mafia_wins,
+                SUM(CASE WHEN m.side = 'Citizen' THEN 1 ELSE 0 END) as citizen_games,
+                SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
+            FROM players p
+            JOIN matches m ON p.id = m.player_id
+            GROUP BY p.id
+            HAVING total_games >= 10
+            ORDER BY overall_win_rate DESC
+        ''')
+        results = c.fetchall()
+        conn.close()
 
     if not results:
-        await update.message.reply_text("هنوز بازیکنی با حداقل ۱۰ بازی در دیتابیس ثبت نشده است.")
+        await update.message.reply_text("هنوز بازیکنی با حداقل ۱۰ بازی در سیستم ثبت نشده است.")
         return
 
     report = "📊 **رتبه‌بندی نهایی بازیکنان (حداقل ۱۰ بازی)**\n\n"
@@ -315,13 +303,11 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report += f"🛡 شهروند: {c_rate}% برد ({c_wins} از {c_games})\n"
         report += "─────────────────────\n"
 
-    # ۵ نفر برتر در ساید مافیا
     mafia_leaders.sort(key=lambda x: (x[1], x[2]), reverse=True)
     report += "\n🔥 **برترین بازیکنان با کارت مافیا:**\n"
     for r, (n, rate, games, wins) in enumerate(mafia_leaders[:5], 1):
         report += f"{r}. {n.title()} ⟵ {rate}% برد ({wins} برد از {games} بازی)\n"
 
-    # ۵ نفر برتر در ساید شهروندی
     citizen_leaders.sort(key=lambda x: (x[1], x[2]), reverse=True)
     report += "\n🛡 **برترین بازیکنان با کارت شهروند:**\n"
     for r, (n, rate, games, wins) in enumerate(citizen_leaders[:5], 1):
@@ -329,13 +315,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(report, parse_mode="Markdown")
 
-# ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات فعال شد و آماده پردازش دسته‌ای پیام‌هاست...")
-    
-    # در صورت قطع بودن اتصال سیستم بدون پروکسی، می‌توانید پروکسی محلی را ست کنید
-    # app = ApplicationBuilder().token(BOT_TOKEN).proxy("socks5://127.0.0.1:10808").get_updates_proxy("socks5://127.0.0.1:10808").build()
+    print("ربات فعال شد و آماده پردازش بدون خطاست...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start_command))
