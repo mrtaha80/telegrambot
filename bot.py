@@ -1,3 +1,4 @@
+import os
 import re
 import hashlib
 import sqlite3
@@ -6,6 +7,11 @@ import unicodedata
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from fuzzywuzzy import process
+
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
 BOT_TOKEN = '8936060141:AAHD7N56eK7FtIq_FBy8E1txGNKkV2lWQjI'
 
@@ -55,7 +61,7 @@ def get_or_create_player(cursor, raw_name):
     clean_name = re.sub(r'[\.\-_:]', ' ', clean_name)
     clean_name = " ".join(clean_name.split())
 
-    if not clean_name or len(clean_name) < 2:
+    if not clean_name or len(clean_name) < 1:
         return None, None
 
     cursor.execute("SELECT id, name FROM players")
@@ -64,7 +70,7 @@ def get_or_create_player(cursor, raw_name):
     if existing_players:
         names = [p[1] for p in existing_players]
         best_match, score = process.extractOne(clean_name, names)
-        if score >= 88 and abs(len(clean_name) - len(best_match)) <= 2:
+        if clean_name == best_match or (score >= 90 and abs(len(clean_name) - len(best_match)) <= 2):
             for p in existing_players:
                 if p[1] == best_match:
                     return p[0], p[1]
@@ -74,7 +80,7 @@ def get_or_create_player(cursor, raw_name):
     row = cursor.fetchone()
     return row[0], clean_name
 
-# ================= تشخیص نقش‌ها =================
+# ================= تشخیص نقش و ساید =================
 def detect_side(scenario, role):
     sc = scenario.lower().strip()
     ro = role.lower().strip()
@@ -113,7 +119,7 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= استخراج اطلاعات =================
+# ================= استخراج تفکیک‌شده لاتین/فارسی =================
 def process_text_data(raw_text, fallback_id):
     try:
         text = normalize_text(raw_text)
@@ -147,43 +153,39 @@ def process_text_data(raw_text, fallback_id):
         if not winning_side:
             return False
 
-        players_block = ""
         players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|$)', text, re.IGNORECASE)
-        if players_match:
-            players_block = players_match.group(1)
-        else:
+        if not players_match:
             return False
 
+        players_block = players_match.group(1)
         conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
         c = conn.cursor()
 
         inserted_any = False
         for line in players_block.strip().splitlines():
             line = line.strip()
-            # فیلتر خطوط خالی، خط‌چین‌ها و ایموجی‌های جداکننده مثل 🥀
-            if not line or any(c in line for c in ['━', '┄', '─', '🥀']):
+            if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯']):
                 continue
 
-            clean_line = re.sub(r'^[^a-zA-Z\u0600-\u06FF]*[0-9➊-➓]+[^a-zA-Z\u0600-\u06FF]*', '', line).strip()
+            clean_line = re.sub(r'^[^a-zA-Z\u0600-\u06FF]*[0-9➊-➓]+[\s\:\.\-\/\•]*', '', line).strip()
             if not clean_line:
                 continue
 
             clean_line = re.sub(r'[👈👉].*$', '', clean_line).strip()
             clean_line = re.sub(r'\(.*?\)', '', clean_line).strip()
 
-            tokens = clean_line.split()
-            if not tokens:
-                continue
-
-            if len(tokens) >= 3 and any(k in " ".join(tokens[-2:]) for k in ['مافیا', 'ساده', 'مافیای ساده', 'رئیس مافیا', 'گودمن']):
-                name = " ".join(tokens[:-2])
-                role = " ".join(tokens[-2:])
-            elif len(tokens) >= 2:
-                name = " ".join(tokens[:-1])
-                role = tokens[-1]
+            lang_split = re.search(r'^([a-zA-Z0-9\.\s_-]+)([\u0600-\u06FF\s].*)$', clean_line)
+            if lang_split:
+                name = lang_split.group(1).strip()
+                role = lang_split.group(2).strip()
             else:
-                name = tokens[0]
-                role = "ساده"
+                tokens = clean_line.split()
+                if len(tokens) >= 2:
+                    name = tokens[0]
+                    role = " ".join(tokens[1:])
+                else:
+                    name = clean_line
+                    role = "ساده"
 
             if not name or name.lower() == 'god':
                 continue
@@ -213,12 +215,115 @@ def process_text_data(raw_text, fallback_id):
         print(f"Error parsing event: {e}")
         return False
 
-# تابع تقسیم پیام‌های طولانی به بسته‌های زیر ۴۰۰۰ کاراکتر
+# ================= ساخت PDF حرفه‌ای =================
+def generate_pdf_report(results, mafia_leaders, citizen_leaders, filename="Mafia_Leaderboard.pdf"):
+    doc = SimpleDocTemplate(
+        filename,
+        pagesize=letter,
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36
+    )
+    elements = []
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        'MainTitle',
+        parent=styles['Heading1'],
+        fontSize=22,
+        leading=26,
+        textColor=colors.HexColor('#1E293B'),
+        alignment=1,
+        spaceAfter=15
+    )
+    subtitle_style = ParagraphStyle(
+        'SubTitle',
+        parent=styles['Normal'],
+        fontSize=11,
+        textColor=colors.HexColor('#64748B'),
+        alignment=1,
+        spaceAfter=25
+    )
+    section_style = ParagraphStyle(
+        'SectionHeading',
+        parent=styles['Heading2'],
+        fontSize=14,
+        leading=18,
+        textColor=colors.HexColor('#0F172A'),
+        spaceBefore=15,
+        spaceAfter=10
+    )
+
+    elements.append(Paragraph("<b>CAFE MAFIA STATISTICAL REPORT</b>", title_style))
+    elements.append(Paragraph("Leaderboard & Player Performance (Minimum 10 Games)", subtitle_style))
+
+    # ۱. جدول اصلی تمام بازیکنان
+    table_data = [["Rank", "Player", "Matches", "Win Rate", "Mafia Record", "Citizen Record"]]
+    for idx, row in enumerate(results, 1):
+        name, total_g, win_rate, m_games, m_wins, c_games, c_wins = row
+        m_rate = (m_wins * 100 // m_games) if m_games > 0 else 0
+        c_rate = (c_wins * 100 // c_games) if c_games > 0 else 0
+        table_data.append([
+            str(idx),
+            name.title(),
+            str(total_g),
+            f"{win_rate:.1f}%",
+            f"{m_rate}% ({m_wins}/{m_games})",
+            f"{c_rate}% ({c_wins}/{c_games})"
+        ])
+
+    main_table = Table(table_data, colWidths=[40, 140, 60, 75, 110, 110])
+    main_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F172A')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('ALIGN', (1, 1), (1, -1), 'LEFT'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 7),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#F8FAFC'), colors.HexColor('#FFFFFF')]),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+        ('FONTSIZE', (0, 1), (-1, -1), 9),
+        ('TOPPADDING', (0, 1), (-1, -1), 5),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 5),
+    ]))
+    elements.append(main_table)
+    elements.append(Spacer(1, 20))
+
+    # ۲. برترین‌های ساید مافیا و ساید شهروندی در دو ستون
+    elements.append(Paragraph("<b>Top Performers by Side</b>", section_style))
+    top_side_data = [["Top Mafia Players", "Top Citizen Players"]]
+    max_len = max(len(mafia_leaders[:5]), len(citizen_leaders[:5]))
+    
+    for i in range(max_len):
+        m_txt = f"{i+1}. {mafia_leaders[i][0].title()} — {mafia_leaders[i][1]}% ({mafia_leaders[i][3]}/{mafia_leaders[i][2]})" if i < len(mafia_leaders[:5]) else ""
+        c_txt = f"{i+1}. {citizen_leaders[i][0].title()} — {citizen_leaders[i][1]}% ({citizen_leaders[i][3]}/{citizen_leaders[i][2]})" if i < len(citizen_leaders[:5]) else ""
+        top_side_data.append([m_txt, c_txt])
+
+    side_table = Table(top_side_data, colWidths=[270, 270])
+    side_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, 0), colors.HexColor('#DC2626')),
+        ('BACKGROUND', (1, 0), (1, 0), colors.HexColor('#2563EB')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+    ]))
+    elements.append(side_table)
+
+    doc.build(elements)
+    return filename
+
+# ================= ارسال پیام‌های متنی بلند =================
 async def send_large_text(update_or_chat_id, text, context):
     max_len = 3800
     lines = text.split('\n')
     current_chunk = ""
-    
     target_chat = update_or_chat_id if isinstance(update_or_chat_id, (int, str)) else update_or_chat_id.effective_chat.id
 
     for line in lines:
@@ -232,7 +337,7 @@ async def send_large_text(update_or_chat_id, text, context):
     if current_chunk.strip():
         await context.bot.send_message(chat_id=target_chat, text=current_chunk, parse_mode="Markdown")
 
-# ================= هندلرها =================
+# ================= هندلرهای تلگرام =================
 async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global TOTAL_PROCESSED_COUNT
     await asyncio.sleep(2.5)
@@ -256,9 +361,9 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
             chat_id=chat_id,
             text=(
                 f"📥 **گزارش پردازش دسته‌ای:**\n"
-                f"🔹 کل پیام‌های دریافت شده: {len(messages)}\n"
+                f"🔹 پیام‌های فوروارد شده: {len(messages)}\n"
                 f"✅ بازی‌های جدید ثبت‌شده: {added}\n"
-                f"📊 مجموع کل بازی‌های ثبت‌شده: {TOTAL_PROCESSED_COUNT}"
+                f"📊 کل بازی‌های ثبت‌شده در دیتابیس: {TOTAL_PROCESSED_COUNT}"
             ),
             parse_mode="Markdown"
         )
@@ -289,13 +394,18 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
         BATCH_TASKS[chat_id] = asyncio.create_task(flush_batch(chat_id, context))
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("ربات آماده است! پیام‌ها را ارسال کنید و با /report گزارش بگیرید.")
+    await update.message.reply_text(
+        "سلام! ربات تحلیل آماری بازی‌های مافیا آماده است.\n\n"
+        "پیام‌ها را فوروارد کنید؛ سیستم همه را پردازش می‌کند.\n"
+        "با ارسال دستور /report گزارش متنی و فایل PDF برای شما صادر خواهد شد."
+    )
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with DB_LOCK:
         conn = sqlite3.connect('mafia_stats.db', timeout=30.0)
         c = conn.cursor()
 
+        # شرط حداقل ۱۰ بازی (total_games >= 10)
         c.execute('''
             SELECT 
                 p.name,
@@ -308,17 +418,17 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             FROM players p
             JOIN matches m ON p.id = m.player_id
             GROUP BY p.id
-            HAVING total_games >= 1
+            HAVING total_games >= 10
             ORDER BY overall_win_rate DESC, total_games DESC
         ''')
         results = c.fetchall()
         conn.close()
 
     if not results:
-        await update.message.reply_text("هنوز هیچ بازی‌ای در سیستم ذخیره نشده است.")
+        await update.message.reply_text("هنوز بازیکنی با حداقل ۱۰ بازی در سیستم ثبت نشده است.")
         return
 
-    report = "📊 **رتبه‌بندی عملکرد بازیکنان**\n\n"
+    report = "📊 **رتبه‌بندی نهایی بازیکنان (حداقل ۱۰ بازی)**\n\n"
     mafia_leaders = []
     citizen_leaders = []
 
@@ -338,24 +448,36 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report += "─────────────────\n"
 
     mafia_leaders.sort(key=lambda x: (x[1], x[2]), reverse=True)
-    report += "\n🔥 **برترین‌های ساید مافیا:**\n"
+    report += "\n🔥 **۵ بازیکن برتر در ساید مافیا:**\n"
     for r, (n, rate, games, wins) in enumerate(mafia_leaders[:5], 1):
         report += f"{r}. {n.title()} ⟵ {rate}% برد ({wins}/{games})\n"
 
     citizen_leaders.sort(key=lambda x: (x[1], x[2]), reverse=True)
-    report += "\n🛡 **برترین‌های ساید شهروند:**\n"
+    report += "\n🛡 **۵ بازیکن برتر در ساید شهروند:**\n"
     for r, (n, rate, games, wins) in enumerate(citizen_leaders[:5], 1):
         report += f"{r}. {n.title()} ⟵ {rate}% برد ({wins}/{games})\n"
 
-    # ارسال امن پیام‌ها بدون محدودیت طول کاراکتر
+    # ارسال گزارش متنی
     await send_large_text(update, report, context)
+
+    # ساخت و ارسال فایل سند PDF
+    pdf_path = generate_pdf_report(results, mafia_leaders, citizen_leaders)
+    try:
+        with open(pdf_path, 'rb') as pdf_file:
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=pdf_file,
+                filename="CafeMafia_Leaderboard.pdf",
+                caption="📄 نسخه PDF گزارش جامع عملکرد بازیکنان (بالای ۱۰ بازی)"
+            )
+    except Exception as e:
+        print(f"Error sending PDF: {e}")
 
 # ================= راه‌اندازی =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با سیستم مدیریت پیام‌های طولانی فعال شد...")
+    print("ربات با سیستم گزارش‌گیری PDF و حداقل ۱۰ بازی فعال شد...")
     
-    # افزایش تایم‌اوت شبکه برای مقابله با کندی پروکسی
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
