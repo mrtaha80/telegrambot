@@ -273,7 +273,6 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= دیتابیس =================
 def init_db():
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
@@ -394,7 +393,6 @@ def get_or_create_player(cursor, raw_name):
     row = cursor.fetchone()
     return row[0], clean_name
 
-# ================= ثبت داده بازی با موتور فوق‌پویا =================
 def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1):
     try:
         norm = normalize_text(raw_text)
@@ -406,7 +404,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         event_id = clean_event_id(raw_event)
         raw_scenario = scenario_match.group(1).strip() if scenario_match else ""
 
-        # استخراج فوق‌العاده پویا و چندخطی برنده مسابقه
         win_block_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_ ]*([\s\S]*?)(?:mvp|☆|★|✦|━|─|$)', norm, re.IGNORECASE)
         if not win_block_match:
             return False, f"ایونت `{event_id}`: سطر برنده بازی پیدا نشد"
@@ -414,7 +411,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         win_text_area = win_block_match.group(1).lower().strip()
 
         winning_side = None
-        # اولویت‌بندی کلمات کلیدی مستقل از توضیحات حاشیه‌ای مثل کیاس و کیک
         if 'مافیا' in win_text_area or 'mafia' in win_text_area:
             winning_side = "Mafia"
         elif 'شهروند' in win_text_area or 'شهر' in win_text_area or 'citizen' in win_text_area:
@@ -577,7 +573,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         print(f"Error parsing event: {e}")
         return False, f"خطای سیستمی: {str(e)}"
 
-# ================= ساخت فایل PDF =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="cafe mafia", filename="Mafia_Leaderboard.pdf"):
     doc = SimpleDocTemplate(filename, pagesize=letter, rightMargin=32, leftMargin=32, topMargin=32, bottomMargin=32)
     elements = []
@@ -683,7 +678,6 @@ def get_main_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# ================= مدیریت دسته‌ای =================
 async def flush_batch_worker(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if chat_id in IS_PROCESSING:
         return
@@ -950,7 +944,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-# ================= گزارش رسمی و لیدربرد =================
+# ================= گزارش رسمی و لیدربرد (اصلاح باگ cw) =================
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
@@ -1027,7 +1021,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'm_games': m_games,
             'm_wins': m_wins,
             'c_games': c_games,
-            'c_wins': cw
+            'c_wins': c_wins
         }
         processed_list.append(p_data)
 
@@ -1254,7 +1248,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با استخراج چندخطی برنده و پشتیبانی کامل از نتایج کیاس فعال شد...")
+    print("ربات با اصلاح خطای محاسبات لیدربرد فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
