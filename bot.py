@@ -62,6 +62,7 @@ PLAYER_ALIASES = {
     'hossein': 'hossein ss',
     'hosein': 'hossein ss',
     'hosein ss': 'hossein ss',
+    'h ss': 'hossein ss',
     'mmd': 'mmd4030',
     'mmd 4030': 'mmd4030',
     'mmd-4030': 'mmd4030',
@@ -77,7 +78,7 @@ PLAYER_ALIASES = {
 def resolve_player_name(raw_name):
     name = raw_name.strip().lower()
     name = re.sub(rf'[{SEAT_SYMBOLS}]', '', name)
-    name = re.sub(r'[\.\-_:⚜️👑💥☆]', ' ', name)
+    name = re.sub(r'[\.\-_:⚜️👑💥☆•]', ' ', name)
     name = " ".join(name.split())
 
     if not name:
@@ -217,7 +218,7 @@ def infer_scenario(extracted_roles, current_scenario=""):
         return "بازپرس"
     elif any(r in all_roles_text for r in ['yaghi', 'یاغی', 'hacker', 'هکر', 'نماینده']):
         return "نماینده"
-    elif any(r in all_roles_text for r in ['matador', 'ماتادور', 'گودمن', 'پدرخوانده', 'نوسترا', 'nostra', 'شرلوک']):
+    elif any(r in all_roles_text for r in ['matador', 'ماتادور', 'گودمن', 'پدرخوانده', 'نوسترا', 'nostra', 'شرلوک', 'کنستانتین', 'لئون', 'همشهری کین']):
         return "پدرخوانده"
     elif any(r in all_roles_text for r in ['grogangir', 'گروگانگیر', 'تکاور']):
         return "تکاور"
@@ -250,7 +251,7 @@ def detect_side(scenario, role):
     elif any(s in sc for s in ['takavar', 'تکاور']):
         mafia_roles.extend(['grogangir', 'گروگانگیر', 'گروگان گیر'])
     elif any(s in sc for s in ['bazpors', 'بازپرس']):
-        mafia_roles.extend(['shayad', 'شیاد'])
+        mafia_roles.extend(['shayad', 'شیاد', 'ناتو', 'رئیس مافیا'])
     elif any(s in sc for s in ['mozakere', 'مذاکره']):
         mafia_roles.extend(['mozakere', 'مذاکره کننده', 'خریدار'])
     elif any(s in sc for s in ['kapo', 'capo', 'کاپو']):
@@ -264,7 +265,7 @@ def detect_side(scenario, role):
     elif any(s in sc for s in ['elclassico', 'الکلاسیکو']):
         mafia_roles.extend(['khoan', 'خوان', 'blanco', 'بلانکو', 'pablo', 'scobar', 'پابلو'])
     elif any(s in sc for s in ['god father', 'pedarkhande', 'پدرخوانده', 'نوسترا', 'nostra', 'jack', 'جک', 'شرلوک']):
-        mafia_roles.extend(['pedarkhande', 'پدرخوانده', 'پدر خوانده', 'matador', 'ماتادور', 'saul', 'گودمن', 'سال گودمن'])
+        mafia_roles.extend(['pedarkhande', 'پدرخوانده', 'پدر خوانده', 'matador', 'ماتادور', 'saul', 'گودمن', 'سال گودمن', 'ساول'])
 
     for m in mafia_roles:
         if m in ro:
@@ -286,8 +287,6 @@ def init_db():
     ''')
 
     c.execute("INSERT OR IGNORE INTO channels (id, name) VALUES (1, 'cafe mafia')")
-    c.execute("SELECT id FROM channels WHERE LOWER(name) = 'cafe mafia'")
-    cafe_mafia_id = c.fetchone()[0]
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS user_active_channel (
@@ -395,32 +394,35 @@ def get_or_create_player(cursor, raw_name):
     row = cursor.fetchone()
     return row[0], clean_name
 
-# ================= ثبت داده بازی =================
+# ================= ثبت داده بازی با موتور فوق‌پویا =================
 def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1):
     try:
         norm = normalize_text(raw_text)
 
         event_match = re.search(r'(?:event|ایونت)\s*[:#•\-_ ]*([0-9]+)', norm, re.IGNORECASE)
-        scenario_match = re.search(r'(?:scenario|سناریو)\s*[:•\-_ ]*([^\n\r]+)', norm, re.IGNORECASE)
-        win_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_ ]*([^\n\r]+)', norm, re.IGNORECASE)
+        scenario_match = re.search(r'(?:scenario|سناریو)\s*[:#•\-_ ]*([^\n\r]+)', norm, re.IGNORECASE)
 
         raw_event = event_match.group(1).strip() if event_match else str(fallback_id)
         event_id = clean_event_id(raw_event)
         raw_scenario = scenario_match.group(1).strip() if scenario_match else ""
 
-        if not win_match:
-            return False, f"ایونت `{event_id}`: سطر نتیجه برنده بازی یافت نشد"
+        # استخراج فوق‌العاده پویا و چندخطی برنده مسابقه
+        win_block_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_ ]*([\s\S]*?)(?:mvp|☆|★|✦|━|─|$)', norm, re.IGNORECASE)
+        if not win_block_match:
+            return False, f"ایونت `{event_id}`: سطر برنده بازی پیدا نشد"
 
-        win_text = win_match.group(1).strip().lower()
+        win_text_area = win_block_match.group(1).lower().strip()
 
         winning_side = None
-        if any(w in win_text for w in ['مافیا', 'mafia']):
+        # اولویت‌بندی کلمات کلیدی مستقل از توضیحات حاشیه‌ای مثل کیاس و کیک
+        if 'مافیا' in win_text_area or 'mafia' in win_text_area:
             winning_side = "Mafia"
-        elif any(w in win_text for w in ['شهر', 'citizen', 'کی اس', 'ks', 'کیاس']):
+        elif 'شهروند' in win_text_area or 'شهر' in win_text_area or 'citizen' in win_text_area:
             winning_side = "Citizen"
 
         if not winning_side:
-            return False, f"ایونت `{event_id}`: ساید برنده از متن '{win_text}' مشخص نیست"
+            first_line = win_text_area.splitlines()[0] if win_text_area else ""
+            return False, f"ایونت `{event_id}`: ساید برنده از متن '{first_line}' مشخص نیست"
 
         conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
         c = conn.cursor()
@@ -429,15 +431,14 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             c.execute("SELECT 1 FROM processed_games WHERE channel_id = ? AND (event_id = ? OR event_id = ?)", (channel_id, event_id, raw_event))
             if c.fetchone():
                 conn.close()
-                return False, f"ایونت `{event_id}`: قبلاً در دیتابیس ثبت شده است (تکراری)"
+                return False, f"ایونت `{event_id}`: این بازی قبلاً ثبت شده است (تکراری)"
 
             c.execute("SELECT COUNT(*) FROM matches WHERE channel_id = ? AND (event_id = ? OR event_id = ?)", (channel_id, event_id, raw_event))
-            existing_matches = c.fetchone()[0]
-            if existing_matches >= 5:
+            if c.fetchone()[0] >= 5:
                 conn.close()
-                return False, f"ایونت `{event_id}`: سوابق این ایونت قبلاً وجود دارد (تکراری)"
+                return False, f"ایونت `{event_id}`: سوابق این ایونت قبلاً ثبت شده است (تکراری)"
 
-        players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|❖|☆|💥|$)', norm, re.IGNORECASE)
+        players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|برنده|برد|🏆|❖|☆|💥|$)', norm, re.IGNORECASE)
         if not players_match:
             conn.close()
             return False, f"ایونت `{event_id}`: لیست بازیکنان پیدا نشد"
@@ -464,12 +465,11 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                     current_seat = int(seat_raw)
 
             clean_line = deep_clean_line(line)
-            clean_line = re.sub(r'^[░👑📡⚜️\s]+', '', clean_line).strip()
-            if not clean_line:
-                continue
-
+            clean_line = re.sub(r'^[░👑📡⚜️\s•]+', '', clean_line).strip()
             clean_line = re.sub(r'[👈👉].*$', '', clean_line).strip()
             clean_line = re.sub(r'\(.*?\)', '', clean_line).strip()
+            if not clean_line:
+                continue
 
             lang_split = re.search(r'^([a-zA-Z0-9\.\s_-]+)([\u0600-\u06FF\s].*)$', clean_line)
             if lang_split:
@@ -477,9 +477,9 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                 role = lang_split.group(2).strip()
             else:
                 tokens = clean_line.split()
-                if len(tokens) >= 2 and any(ch in tokens[1] for ch in 'آابپتثجچحخدذرزژسشصضطظعغفقکگلمنوهی'):
-                    name = tokens[0]
-                    role = " ".join(tokens[1:])
+                if len(tokens) >= 2 and any(ch in tokens[-1] for ch in 'آابپتثجچحخدذرزژسشصضطظعغفقکگلمنوهی'):
+                    name = " ".join(tokens[:-1])
+                    role = tokens[-1]
                 else:
                     name = tokens[0] if tokens else clean_line
                     role = " ".join(tokens[1:]) if len(tokens) > 1 else ""
@@ -543,7 +543,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         c.execute("SELECT 1 FROM processed_games WHERE game_signature = ? AND channel_id = ?", (game_signature, channel_id))
         if c.fetchone():
             conn.close()
-            return False, f"ایونت `{event_id}`: محتوای این بازی قبلاً ثبت شده است (تکراری)"
+            return False, f"ایونت `{event_id}`: این بازی تکراری است و قبلاً ثبت شده بود"
 
         for name, role, side in parsed_players:
             player_id, _ = get_or_create_player(c, name)
@@ -683,7 +683,7 @@ def get_main_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# ================= مدیریت دسته‌ای پایدار بدون قفل متداخل =================
+# ================= مدیریت دسته‌ای =================
 async def flush_batch_worker(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if chat_id in IS_PROCESSING:
         return
@@ -932,10 +932,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🌟 **ویژگی‌های سامانه:**\n\n"
         f"🔹 **پشتیبانی از تفکیک کانال‌ها:**\n"
         f"داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند و می‌توانید کانال جدید ایجاد یا انتخاب کنید.\n\n"
-        f"🔹 **تشخیص قطعی بازی‌های تکراری:**\n"
-        f"بررسی ۳ لایه با شناسه ایونت عددی، هش ترکیب اعضا و سوابق ثبت‌شده قبلی.\n\n"
-        f"🔹 **پردازش پایدار بسته‌های سنگین:**\n"
-        f"پردازش همزمان و ارسال گزارش دقیق برای تمام موارد دریافتی بدون قفل شدن ربات.\n\n"
+        f"🔹 **تشخیص قطعی برنده و سایدها:**\n"
+        f"پشتیبانی از انواع فرمت‌های اعلام نتیجه چندخطی و کیاس.\n\n"
+        f"🔹 **پردازش بدون قفل بسته‌های بزرگ:**\n"
+        f"پردازش همزمان و ارسال گزارش دقیق برای تمام موارد دریافتی بدون وقفه.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -1254,7 +1254,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با معماری ضد قفل (Deadlock-Free) و پشتیبانی از انواع فرمت‌های ایونت فعال شد...")
+    print("ربات با استخراج چندخطی برنده و پشتیبانی کامل از نتایج کیاس فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
@@ -1318,3 +1318,13 @@ if __name__ == '__main__':
         app.run_polling(drop_pending_updates=False)
     except KeyboardInterrupt:
         print("\nربات با درخواست کاربر خاموش شد.")
+
+# اگر از پروکسی محلی (مثل v2rayNG یا Nekoray) استفاده می‌کنید:
+custom_request = HTTPXRequest(
+    proxy_url="socks5://127.0.0.1:10808",  # یا http://127.0.0.1:10809 بر اساس کلاینت شما
+    connection_pool_size=100,
+    pool_timeout=60.0,
+    read_timeout=60.0,
+    write_timeout=60.0,
+    connect_timeout=60.0,
+)
