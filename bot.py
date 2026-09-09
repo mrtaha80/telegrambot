@@ -49,8 +49,8 @@ LINK_PROFILE_STATE = 2
 ADD_CHANNEL_STATE = 3
 
 SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯"
-# لیست اسامی که داده‌هایشان مخفی می‌شود اما از دیتابیس حذف فیزیکی نمی‌شوند
-HIDDEN_PLAYERS = {'ali', 'sara', 'god', 'گاد', 'hasan', 'azar', 'saeid a'}
+# اضافه شدن ana و zahra به لیست اسامی پنهان‌آماری
+HIDDEN_PLAYERS = {'ali', 'sara', 'god', 'گاد', 'hasan', 'azar', 'saeid a', 'amir', 'ana', 'zahra'}
 
 PLAYER_ALIASES = {
     'mohammad a': 'omid',
@@ -61,7 +61,7 @@ PLAYER_ALIASES = {
     'alireza': 'alireza kamali',
     'alireza k': 'alireza kamali',
     'hossein': 'hossein ss',
-    'hosein': 'hosein ss',
+    'hosein': 'hossein ss',
     'hosein ss': 'hossein ss',
     'h ss': 'hossein ss',
     'mmd': 'mmd4030',
@@ -101,11 +101,14 @@ def resolve_player_name(raw_name):
     if not name:
         return ""
 
+    # تفکیک صریح و مجزا برای جلوگیری از ادغام ana و hana
+    if name in ['ana', 'anna']:
+        return 'ana'
+    if name in ['hana', 'hanna']:
+        return 'hana'
+
     if name in PLAYER_ALIASES:
         return PLAYER_ALIASES[name]
-
-    if name == 'ana' or name == 'هانا':
-        return 'ana' if name == 'ana' else 'hana'
 
     if re.search(r'\b(qaderi|ghaderi)\b', name) or 'قادری' in name:
         return 'qaderi'
@@ -320,7 +323,7 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= دیتابیس و ادغام کامل حساب‌ها (بدون حذف فیزیکی داده‌ها) =================
+# ================= دیتابیس و ادغام کامل حساب‌ها =================
 def merge_player_accounts(cursor):
     merges = {
         'mmd4030': ['mamad', 'mammad', 'mohamad', 'mohammad', 'mmd', 'mmd 4030', 'mohammad 4030', 'mohamad 4030', 'mamad 4030', 'mammad 4030'],
@@ -547,7 +550,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                 p_name = re.sub(r'^\d{1,2}\s*', '', p_name).strip()
                 
                 clean_name = resolve_player_name(p_name)
-                if clean_name:
+                if clean_name and clean_name != 'god':
                     temp_players.append({
                         'name': clean_name,
                         'role': p_role
@@ -565,7 +568,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                     p_role = tokens[-1]
                     p_name = re.sub(r'^[^\w\u0600-\u06FF]+', '', p_name).strip()
                     p_name = resolve_player_name(p_name)
-                    if p_name and len(p_name) >= 2:
+                    if p_name and p_name != 'god' and len(p_name) >= 2:
                         temp_players.append({
                             'name': p_name,
                             'role': p_role
@@ -963,7 +966,7 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
     norm_content = normalize_text(raw_content).lower()
 
     if (any(k in norm_content for k in ['player', 'بازیکن', 'سیت', 'ساده', 'مافیا', 'event', 'ایونت']) and 
-        any(w in norm_content for w in ['win', 'برد', 'شهروند', 'مافیا', 'کیاс', 'شهر'])) or image_bytes:
+        any(w in norm_content for w in ['win', 'برد', 'شهروند', 'مافیا', 'کیاس', 'شهر'])) or image_bytes:
 
         chat_id = msg.chat_id
         if chat_id not in BATCH_STORAGE:
@@ -990,8 +993,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
-        f"🔹 **پنهان‌سازی هوشمند آماری:** مخفی شدن داده‌های hasan، azar، saeid a و غیره بدون حذف فیزیکی.\n"
         f"🔹 **تفکیک صریح Ana و Hana:** استقلال کامل آمار دو بازیکن.\n"
+        f"🔹 **مخفی‌سازی هوشمند Amir و سایر موارد:** عدم نمایش داده‌های آماری اسامی خاص بدون حذف فیزیکی.\n"
         f"🔹 **۱۰ بازیکن برتر هر ساید:** رتبه‌بندی تخصصی ۱۰ نفر برتر مافیا و شهروند در لیدربرد و PDF.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
@@ -1015,15 +1018,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛡 **۳. تفکیک تخصصی سایدها:**\n"
         "مهارت بازیکن در کنترل شب (مافیا) و استدلال روز (شهروند) به صورت کاملاً مجزا در دو جدول تفکیک و ارزیابی می‌شوند.\n\n"
 
-        "🔍 **۴. پنهان‌سازی صریح داده‌ها:**\n"
-        "اطلاعات آماری اسامی خاص (مانند hasan، azar و saeid a) در گزارش‌ها و جستجوها نمایش داده نمی‌شوند ولی در دیتابیس حفظ می‌شوند.\n\n"
+        "🔍 **۴. تفکیک حساب‌های مشابه (Ana و Hana):**\n"
+        "سیستم به صورت کاملاً مستقل اسامی Ana و Hana را پردازش می‌کند تا تداخلی در آمارشان ایجاد نشود.\n\n"
 
         "📄 **۵. تالار افتخارات PDF:**\n"
         "با کلیک روی دکمه گزارش، فایل PDF شکیل و استاندارد (بدون کاراکترهای مربعی شکل) شامل رتبه‌بندی کلی و ۱۰ بازیکن برتر هر ساید برای شما صادر می‌شود."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-# ================= گزارش رسمی و لیدربرد امن (بدون کرش و با پنهان‌سازی) =================
+# ================= گزارش رسمی و لیدربرد امن (بدون کرش و با پنهان‌سازی هوشمند) =================
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
@@ -1346,7 +1349,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با قابلیت پنهان‌سازی آماری بدون حذف فیزیکی داده‌ها فعال شد...")
+    print("ربات با تفکیک دقیق Ana و Hana و پنهان‌سازی Zahra و Amir فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
