@@ -9,6 +9,7 @@ import unicodedata
 import io
 import json
 import requests
+from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
@@ -49,7 +50,8 @@ LINK_PROFILE_STATE = 2
 ADD_CHANNEL_STATE = 3
 
 SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯"
-EXCLUDED_PLAYERS = {'ali', 'sara'}
+# لیست سیاه کامل شامل پلیرهای فیک و عنوان گاد بازی
+EXCLUDED_PLAYERS = {'ali', 'sara', 'god', 'گاد', 'tina', 'niku', 'forood', 'arash', 'selin'}
 
 PLAYER_ALIASES = {
     'mohammad a': 'omid',
@@ -90,10 +92,10 @@ PLAYER_ALIASES = {
 def resolve_player_name(raw_name):
     name = raw_name.strip().lower()
     name = re.sub(rf'[{SEAT_SYMBOLS}]', '', name)
-    name = re.sub(r'[\.\-_:⚜️👑💥☆•⛑🩸🧨]', ' ', name)
+    name = re.sub(r'[\.\-_:⚜️👑💥☆•]', ' ', name)
     name = " ".join(name.split())
 
-    if not name:
+    if not name or name in EXCLUDED_PLAYERS or name == 'god':
         return ""
 
     if name in PLAYER_ALIASES:
@@ -321,6 +323,9 @@ def merge_player_accounts(cursor):
         'qaderi': ['ghaderi']
     }
 
+    # پاکسازی صریح کلمه god و گاد از جدول players
+    cursor.execute("DELETE FROM players WHERE LOWER(name) IN ('god', 'گاد', 'tina', 'niku', 'forood', 'arash', 'selin')")
+
     cursor.execute("SELECT id, name FROM players WHERE LOWER(name) LIKE '%qaderi%' OR LOWER(name) LIKE '%ghaderi%'")
     qaderi_matches = cursor.fetchall()
     
@@ -457,10 +462,7 @@ def get_user_channel(c, user_id):
 def get_or_create_player(cursor, raw_name):
     clean_name = resolve_player_name(raw_name)
 
-    if not clean_name or len(clean_name) < 2 or clean_name.isdigit() or clean_name == 'god':
-        return None, None
-
-    if clean_name in EXCLUDED_PLAYERS:
+    if not clean_name or len(clean_name) < 2 or clean_name in EXCLUDED_PLAYERS or clean_name.isdigit() or clean_name == 'god':
         return None, None
 
     if not re.search(r'[a-zA-Z\u0600-\u06FF]', clean_name):
@@ -495,10 +497,8 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         event_id = clean_event_id(raw_event)
         raw_scenario = scenario_match.group(1).strip() if scenario_match else ""
 
-        # جستجوی بلوک برنده بازی با انعطاف بالا
         win_block_match = re.search(r'(?:winner|win|برنده|برد|🧨)\s*[:•\-_ ]*([\s\S]*?)(?:mvp|☆|★|✦|━|─|$)', norm, re.IGNORECASE)
         if not win_block_match:
-            win_block_match = re.search(r'(?:شهروند|مافیا)\s*$', norm, re.IGNORECASE)
             win_text_area = norm
         else:
             win_text_area = win_block_match.group(1).lower().strip()
@@ -531,54 +531,40 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                 conn.close()
                 return False, f"ایونت `{event_id}`: سوابق این ایونت قبلاً ثبت شده است (تکراری)"
 
-        # استخراج خطوط بازیکنان با پشتیبانی از انواع فرمت‌های لژیونی
         temp_players = []
         lines = norm.splitlines()
-        capturing = False
 
         for line in lines:
             line_str = line.strip()
-            if not line_str:
+            if not line_str or any(w in line_str.lower() for w in ['event', 'ایونت', 'time', 'god', 'گاد', 'scenario', 'سناریو', 'date', 'تاریخ', 'winner', 'برنده', 'win', 'players', 'بازیکنان']):
                 continue
-            if 'player' in line_str.lower() or 'بازیکنان' in line_str or 'پلیرها' in line_str:
-                capturing = True
-                continue
-            if 'winner' in line_str.lower() or 'برنده' in line_str or 'win' in line_str.lower() or '☆' in line_str or '━' in line_str:
-                if capturing and len(temp_players) >= 3:
-                    break
 
-            # الگو برای خطوط بازیکن (مثلا 01 shahrzad کاراگاه یا ⚜️𝟎𝟒 m.h.ghaderi رئیس مافیا)
             match_p = re.search(r'(?:[⚜️🩸⛑\d\s\-\:\.\•\(\)]+)*([a-zA-Z\u0600-\u06FF\.\s_]+)[\s\:\-]+(.+)', line_str)
-            if match_p and not any(w in line_str.lower() for w in ['event', 'ایونت', 'time', 'زمان', 'god', 'گاد', 'scenario', 'سناریو', 'date', 'تاریخ']):
+            if match_p:
                 p_name = match_p.group(1).strip()
                 p_role = match_p.group(2).strip()
-                
-                # پاکسازی پیشوند اعداد سیت اگر چسبیده باشد
                 p_name = re.sub(r'^\d{1,2}\s*', '', p_name).strip()
                 
-                if len(p_name) >= 2 and re.search(r'[a-zA-Z\u0600-\u06FF]', p_name):
-                    clean_name = resolve_player_name(p_name)
-                    if clean_name not in EXCLUDED_PLAYERS:
-                        temp_players.append({
-                            'name': clean_name,
-                            'role': p_role
-                        })
+                clean_name = resolve_player_name(p_name)
+                if clean_name and clean_name not in EXCLUDED_PLAYERS and clean_name != 'god':
+                    temp_players.append({
+                        'name': clean_name,
+                        'role': p_role
+                    })
 
-        # اگر با روش بالا پیدا نشد، کل متن را خط به خط اسکن کن تا فرمت‌های ساده‌تر هم خوانده شوند
         if len(temp_players) < 5:
             temp_players = []
             for line in lines:
                 line_str = line.strip()
-                if any(w in line_str.lower() for w in ['event', 'ایونت', 'time', 'god', 'scenario', 'date', 'win', 'برنده', 'players', 'بازیکنان']):
+                if any(w in line_str.lower() for w in ['event', 'ایونت', 'time', 'god', 'گاد', 'scenario', 'سناریو', 'date', 'تاریخ', 'win', 'برنده', 'players', 'بازیکنان']):
                     continue
                 tokens = line_str.split()
                 if len(tokens) >= 2:
-                    # فرض بر این که کلمه آخر نقش و بقیه اسم است
-                    p_name = " ".join(tokens[1:-1]) if len(tokens) > 2 else tokens[0]
+                    p_name = tokens[0]
                     p_role = tokens[-1]
                     p_name = re.sub(r'^[^\w\u0600-\u06FF]+', '', p_name).strip()
                     p_name = resolve_player_name(p_name)
-                    if len(p_name) >= 2 and p_name not in EXCLUDED_PLAYERS and re.search(r'[a-zA-Z\u0600-\u06FF]', p_name):
+                    if p_name and p_name not in EXCLUDED_PLAYERS and p_name != 'god' and len(p_name) >= 2:
                         temp_players.append({
                             'name': p_name,
                             'role': p_role
@@ -641,6 +627,29 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
     except Exception as e:
         print(f"Error parsing event: {e}")
         return False, f"خطای سیستمی: {str(e)}"
+
+# ================= دستور بازبینی ساعتی و اصلاح رتبه‌بندی (/recheck) =================
+async def recheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+    c = conn.cursor()
+    ch_id, ch_name = get_user_channel(c, user_id)
+    
+    # پاکسازی صریح رکوردهای گاد یا پلیرهای اشتباهی از جدول matches
+    c.execute("DELETE FROM matches WHERE player_id IN (SELECT id FROM players WHERE LOWER(name) IN ('god', 'گاد', 'tina', 'niku', 'forood', 'arash', 'selin', 'ali', 'sara'))")
+    c.execute("DELETE FROM players WHERE LOWER(name) IN ('god', 'گاد', 'tina', 'niku', 'forood', 'arash', 'selin', 'ali', 'sara')")
+    
+    merge_player_accounts(c)
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        f"🔄 **بازبینی و اصلاح دیتابیس کانال {ch_name} با موفقیت انجام شد!**\n"
+        f"▫️ اکانت‌های مربوط به 'گاد' و پلیرهای نامعتبر پاکسازی شدند.\n"
+        f"▫️ رتبه‌بندی بیزی مجدداً محاسبه و به‌روزرسانی گردید.",
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard()
+    )
 
 # ================= ساخت فایل PDF شکیل بدون کاراکترهای مربعی =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="cafe mafia", filename="Mafia_Leaderboard.pdf"):
@@ -1003,9 +1012,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
-        f"🔹 **پارسر فوق‌پیشرفته اسامی:** خواندن دقیق لیست بازیکنان با هر نوع فرمت و کاراکتر تزئینی.\n"
-        f"🔹 **۱۰ بازیکن برتر هر ساید:** رتبه‌بندی تخصصی ۱۰ نفر برتر مافیا و شهروند در لیدربرد و PDF.\n"
-        f"🔹 **هماهنگی کامل رتبه کارت شخصی با تالار افتخارات.**\n\n"
+        f"🔹 **فیلتر هوشمند گاد و ادمین‌ها:** حذف خودکار عنوان God از جدول بازیکنان.\n"
+        f"🔹 **دستور بازبینی فوری (`/recheck`):** اصلاح و به‌روزرسانی آنی رتبه‌بندی‌ها.\n"
+        f"🔹 **۱۰ بازیکن برتر هر ساید:** رتبه‌بندی تخصصی ۱۰ نفر برتر مافیا و شهروند در لیدربرد و PDF.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -1028,11 +1037,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛡 **۳. تفکیک تخصصی سایدها:**\n"
         "مهارت بازیکن در کنترل شب (مافیا) و استدلال روز (شهروند) به صورت کاملاً مجزا در دو جدول تفکیک و ارزیابی می‌شوند.\n\n"
 
-        "🔍 **۴. تطبیق هوشمند نام‌های مرکب:**\n"
-        "سیستم تمامی نام‌های مشابه یا مرکب (مانند M H Qaderi) را به صورت خودکار زیرمجموعه هویت اصلی (Qaderi) ثبت و ادغام می‌کند.\n\n"
+        "🔄 **۴. دستور بازبینی و پاکسازی (`/recheck`):**\n"
+        "با ارسال این دستور در چت ربات، دیتابیس از اسامی اشتباهی (مثل God) پاکسازی شده و لیدربرد دوباره محاسبه می‌شود.\n\n"
 
         "📄 **۵. تالار افتخارات PDF:**\n"
-        "با کلیک روی دکمه گزارش، فایل PDF شکیل و استاندارد (بدون کاراکترهای مربعی شکل) شامل رتبه‌بندی کلی و ۱۰ بازیکن برتر هر ساید برای شما صادر می‌شود."
+        "با کلیک روی دکمه گزارش، فایل PDF شکیل و استاندارد شامل رتبه‌بندی کلی و ۱۰ بازیکن برتر هر ساید برای شما صادر می‌شود."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -1359,7 +1368,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با پارسر فوق‌پیشرفته و رفع خطای لیدربرد فعال شد...")
+    print("ربات با فیلتر قطعی God و قابلیت بازبینی فوری فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
@@ -1412,6 +1421,8 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("report", report_command))
+    app.add_handler(CommandHandler("recheck", recheck_command))
+    app.add_handler(CommandHandler("reparse", recheck_command))
 
     app.add_handler(search_conv)
     app.add_handler(link_conv)
