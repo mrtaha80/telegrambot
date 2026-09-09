@@ -44,14 +44,14 @@ BOT_TOKEN = '8936060141:AAHD7N56eK7FtIq_FBy8E1txGNKkV2lWQjI'
 BATCH_STORAGE = {}
 BATCH_TIMERS = {}
 IS_PROCESSING = set()
+RAW_MESSAGES_ARCHIVE = {} # آرشیو پیام‌ها برای بازسازی دیتابیس
 
 SEARCH_STATE = 1
 LINK_PROFILE_STATE = 2
 ADD_CHANNEL_STATE = 3
 
 SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯"
-# لیست سیاه کامل شامل پلیرهای فیک و عنوان گاد بازی
-EXCLUDED_PLAYERS = {'ali', 'sara', 'god', 'گاد', 'tina', 'niku', 'forood', 'arash', 'selin'}
+EXCLUDED_PLAYERS = {'ali', 'sara', 'god', 'گاد', 'tina', 'forood', 'arash', 'selin'}
 
 PLAYER_ALIASES = {
     'mohammad a': 'omid',
@@ -87,6 +87,8 @@ PLAYER_ALIASES = {
     'ebi': 'ebi',
     'ghaderi': 'qaderi',
     'qaderi': 'qaderi',
+    'nikutin': 'niku',
+    'niku': 'niku',
 }
 
 def resolve_player_name(raw_name):
@@ -115,6 +117,9 @@ def resolve_player_name(raw_name):
 
     if fuzz.ratio(name, 'ebrahim') >= 85 or fuzz.ratio(name, 'ebi') >= 90:
         return 'ebi'
+
+    if fuzz.ratio(name, 'nikutin') >= 80 or fuzz.ratio(name, 'niku') >= 85:
+        return 'niku'
 
     if 'qaderi' in name or 'ghaderi' in name or fuzz.partial_ratio(name, 'qaderi') >= 80 or fuzz.partial_ratio(name, 'ghaderi') >= 80:
         return 'qaderi'
@@ -320,11 +325,11 @@ def merge_player_accounts(cursor):
         'hossein ss': ['hossein', 'hosein', 'hosein ss', 'h ss'],
         'alireza milan': ['milan'],
         'ebi': ['ebrahim'],
-        'qaderi': ['ghaderi']
+        'qaderi': ['ghaderi'],
+        'niku': ['nikutin']
     }
 
-    # پاکسازی صریح کلمه god و گاد از جدول players
-    cursor.execute("DELETE FROM players WHERE LOWER(name) IN ('god', 'گاد', 'tina', 'niku', 'forood', 'arash', 'selin')")
+    cursor.execute("DELETE FROM players WHERE LOWER(name) IN ('god', 'گاد', 'tina', 'forood', 'arash', 'selin', 'ali', 'sara')")
 
     cursor.execute("SELECT id, name FROM players WHERE LOWER(name) LIKE '%qaderi%' OR LOWER(name) LIKE '%ghaderi%'")
     qaderi_matches = cursor.fetchall()
@@ -426,15 +431,16 @@ def init_db():
             game_signature TEXT,
             channel_id INTEGER,
             event_id TEXT,
+            raw_text TEXT,
             PRIMARY KEY(game_signature, channel_id)
         )
     ''')
 
     c.execute("PRAGMA table_info(processed_games)")
     cols = [r[1] for r in c.fetchall()]
-    if 'event_id' not in cols:
+    if 'raw_text' not in cols:
         try:
-            c.execute("ALTER TABLE processed_games ADD COLUMN event_id TEXT")
+            c.execute("ALTER TABLE processed_games ADD COLUMN raw_text TEXT")
         except Exception:
             pass
 
@@ -486,7 +492,7 @@ def get_or_create_player(cursor, raw_name):
     return row[0], clean_name
 
 # ================= پارسر فوق‌پیشرفته و هوشمند ثبت داده بازی =================
-def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1):
+def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1, save_archive=True):
     try:
         norm = normalize_text(raw_text)
 
@@ -520,23 +526,18 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
         c = conn.cursor()
 
-        if event_id != "0":
+        if event_id != "0" and save_archive:
             c.execute("SELECT 1 FROM processed_games WHERE channel_id = ? AND (event_id = ?)", (channel_id, event_id))
             if c.fetchone():
                 conn.close()
                 return False, f"ایونت `{event_id}`: این بازی قبلاً ثبت شده است (تکراری)"
-
-            c.execute("SELECT COUNT(*) FROM matches WHERE channel_id = ? AND (event_id = ?)", (channel_id, event_id))
-            if c.fetchone()[0] >= 5:
-                conn.close()
-                return False, f"ایونت `{event_id}`: سوابق این ایونت قبلاً ثبت شده است (تکراری)"
 
         temp_players = []
         lines = norm.splitlines()
 
         for line in lines:
             line_str = line.strip()
-            if not line_str or any(w in line_str.lower() for w in ['event', 'ایونت', 'time', 'god', 'گاد', 'scenario', 'سناریو', 'date', 'تاریخ', 'winner', 'برنده', 'win', 'players', 'بازیکنان']):
+            if not line_str or any(w in line_str.lower() for w in ['event', 'ایونت', 'time', 'god', 'گاد', 'scenario', 'سناریو', 'date', 'تاریخ', 'winner', 'برنده', 'win', 'players', 'بازیکنان', 'tina', 'niku', 'forood', 'arash', 'selin']):
                 continue
 
             match_p = re.search(r'(?:[⚜️🩸⛑\d\s\-\:\.\•\(\)]+)*([a-zA-Z\u0600-\u06FF\.\s_]+)[\s\:\-]+(.+)', line_str)
@@ -556,7 +557,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             temp_players = []
             for line in lines:
                 line_str = line.strip()
-                if any(w in line_str.lower() for w in ['event', 'ایونت', 'time', 'god', 'گاد', 'scenario', 'سناریو', 'date', 'تاریخ', 'win', 'برنده', 'players', 'بازیکنان']):
+                if any(w in line_str.lower() for w in ['event', 'ایونت', 'time', 'god', 'گاد', 'scenario', 'سناریو', 'date', 'تاریخ', 'win', 'برنده', 'players', 'بازیکنان', 'tina', 'niku', 'forood', 'arash', 'selin']):
                     continue
                 tokens = line_str.split()
                 if len(tokens) >= 2:
@@ -591,10 +592,11 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         full_identity = f"ch_{channel_id}_ev_{event_id}_sc_{scenario.lower()[:8]}_{winning_side}_{players_fingerprint}"
         game_signature = hashlib.sha256(full_identity.encode('utf-8')).hexdigest()
 
-        c.execute("SELECT 1 FROM processed_games WHERE game_signature = ? AND channel_id = ?", (game_signature, channel_id))
-        if c.fetchone():
-            conn.close()
-            return False, f"ایونت `{event_id}`: این بازی تکراری است و قبلاً ثبت شده بود"
+        if save_archive:
+            c.execute("SELECT 1 FROM processed_games WHERE game_signature = ? AND channel_id = ?", (game_signature, channel_id))
+            if c.fetchone():
+                conn.close()
+                return False, f"ایونت `{event_id}`: این بازی تکراری است و قبلاً ثبت شده بود"
 
         for name, role, side in parsed_players:
             player_id, _ = get_or_create_player(c, name)
@@ -608,9 +610,9 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             ''', (player_id, channel_id, game_signature, event_id, scenario, side, is_win))
 
         c.execute('''
-            INSERT OR REPLACE INTO processed_games (game_signature, channel_id, event_id)
-            VALUES (?, ?, ?)
-        ''', (game_signature, channel_id, event_id))
+            INSERT OR REPLACE INTO processed_games (game_signature, channel_id, event_id, raw_text)
+            VALUES (?, ?, ?, ?)
+        ''', (game_signature, channel_id, event_id, raw_text))
 
         conn.commit()
         conn.close()
@@ -628,28 +630,43 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         print(f"Error parsing event: {e}")
         return False, f"خطای سیستمی: {str(e)}"
 
-# ================= دستور بازبینی ساعتی و اصلاح رتبه‌بندی (/recheck) =================
-async def recheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= دستور بازسازی کامل و پاکسازی دیتابیس (/rebuild_db) =================
+async def rebuild_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
     ch_id, ch_name = get_user_channel(c, user_id)
-    
-    # پاکسازی صریح رکوردهای گاد یا پلیرهای اشتباهی از جدول matches
-    c.execute("DELETE FROM matches WHERE player_id IN (SELECT id FROM players WHERE LOWER(name) IN ('god', 'گاد', 'tina', 'niku', 'forood', 'arash', 'selin', 'ali', 'sara'))")
-    c.execute("DELETE FROM players WHERE LOWER(name) IN ('god', 'گاد', 'tina', 'niku', 'forood', 'arash', 'selin', 'ali', 'sara')")
-    
+
+    # گرفتن تمام متن‌های آرشیو شده بازی‌ها
+    c.execute("SELECT raw_text, channel_id FROM processed_games WHERE raw_text IS NOT NULL")
+    archived_games = c.fetchall()
+
+    # پاکسازی جدول مسابقات و بازیکنان و بازی‌های پردازش‌شده
+    c.execute("DELETE FROM matches")
+    c.execute("DELETE FROM players")
+    c.execute("DELETE FROM processed_games")
+    conn.commit()
+
+    success_count = 0
+    for raw_text, cid in archived_games:
+        ok, _ = process_game_data(raw_text, channel_id=cid, save_archive=True)
+        if ok:
+            success_count += 1
+
     merge_player_accounts(c)
     conn.commit()
     conn.close()
 
     await update.message.reply_text(
-        f"🔄 **بازبینی و اصلاح دیتابیس کانال {ch_name} با موفقیت انجام شد!**\n"
-        f"▫️ اکانت‌های مربوط به 'گاد' و پلیرهای نامعتبر پاکسازی شدند.\n"
-        f"▫️ رتبه‌بندی بیزی مجدداً محاسبه و به‌روزرسانی گردید.",
+        f"🛠 **بازسازی کامل دیتابیس کانال {ch_name} انجام شد!**\n"
+        f"▫️ کل بازی‌های آرشیو شده مجدداً از صفر تجزیه و تحلیل شدند.\n"
+        f"▫️ تعداد `{success_count}` بازی معتبر بدون احتساب گاد و ادمین‌ها بازسازی و ثبت گردید.",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
+
+async def recheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await rebuild_db_command(update, context)
 
 # ================= ساخت فایل PDF شکیل بدون کاراکترهای مربعی =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="cafe mafia", filename="Mafia_Leaderboard.pdf"):
@@ -793,7 +810,7 @@ async def flush_batch_worker(chat_id, context: ContextTypes.DEFAULT_TYPE):
         rejected_reasons = []
 
         for text, img_bytes, msg_id in batch_data:
-            ok, res = process_game_data(text, img_bytes, msg_id, ch_id)
+            ok, res = process_game_data(text, img_bytes, msg_id, ch_id, save_archive=True)
             if ok:
                 added += 1
                 accepted_details.append(res)
@@ -844,14 +861,14 @@ async def flush_batch_worker(chat_id, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(flush_batch_worker(chat_id, context))
 
 async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030, Ebi, Alireza Milan, Qaderi)*")
+    await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030, Ebi, Alireza Milan, Qaderi, Niku)*")
     return SEARCH_STATE
 
 async def link_profile_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔗 **اتصال نام بازیکن در بازی:**\n"
         "نام انگلیسی خود را که در بازی‌ها ثبت می‌شود وارد کنید:\n"
-        "*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030, Ebi, Alireza Milan, Qaderi)*"
+        "*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030, Ebi, Alireza Milan, Qaderi, Niku)*"
     )
     return LINK_PROFILE_STATE
 
@@ -1012,8 +1029,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
-        f"🔹 **فیلتر هوشمند گاد و ادمین‌ها:** حذف خودکار عنوان God از جدول بازیکنان.\n"
-        f"🔹 **دستور بازبینی فوری (`/recheck`):** اصلاح و به‌روزرسانی آنی رتبه‌بندی‌ها.\n"
+        f"🔹 **دستور بازسازی کامل دیتابیس (`/rebuild_db`):** پاکسازی کامل و خواندن مجدد تمامی بازی‌ها از صفر.\n"
+        f"🔹 **فیلتر قطعی گادها و ادمین‌ها:** جلوگیری از ثبت عنوان God به عنوان بازیکن.\n"
         f"🔹 **۱۰ بازیکن برتر هر ساید:** رتبه‌بندی تخصصی ۱۰ نفر برتر مافیا و شهروند در لیدربرد و PDF.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
@@ -1037,11 +1054,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛡 **۳. تفکیک تخصصی سایدها:**\n"
         "مهارت بازیکن در کنترل شب (مافیا) و استدلال روز (شهروند) به صورت کاملاً مجزا در دو جدول تفکیک و ارزیابی می‌شوند.\n\n"
 
-        "🔄 **۴. دستور بازبینی و پاکسازی (`/recheck`):**\n"
-        "با ارسال این دستور در چت ربات، دیتابیس از اسامی اشتباهی (مثل God) پاکسازی شده و لیدربرد دوباره محاسبه می‌شود.\n\n"
+        "🔄 **۴. دستور بازسازی کامل (`/rebuild_db`):**\n"
+        "با ارسال این دستور در چت ربات، کل دیتابیس ریست شده و تمام پیام‌های تاییدشده قبلی از نو و بدون خطای گادها پردازش می‌شوند.\n\n"
 
         "📄 **۵. تالار افتخارات PDF:**\n"
-        "با کلیک روی دکمه گزارش، فایل PDF شکیل و استاندارد شامل رتبه‌بندی کلی و ۱۰ بازیکن برتر هر ساید برای شما صادر می‌شود."
+        "با کلیک روی دکمه گزارش، فایل PDF شکیل و استاندارد (بدون کاراکترهای مربعی شکل) شامل رتبه‌بندی کلی و ۱۰ بازیکن برتر هر ساید برای شما صادر می‌شود."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -1368,7 +1385,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با فیلتر قطعی God و قابلیت بازبینی فوری فعال شد...")
+    print("ربات با قابلیت بازسازی کامل دیتابیس (/rebuild_db) فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
@@ -1421,8 +1438,8 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("report", report_command))
-    app.add_handler(CommandHandler("recheck", recheck_command))
-    app.add_handler(CommandHandler("reparse", recheck_command))
+    app.add_handler(CommandHandler("rebuild_db", rebuild_db_command))
+    app.add_handler(CommandHandler("recheck", rebuild_db_command))
 
     app.add_handler(search_conv)
     app.add_handler(link_conv)
