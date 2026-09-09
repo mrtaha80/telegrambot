@@ -79,6 +79,11 @@ PLAYER_ALIASES = {
     'mammad 4030': 'mmd4030',
     'mamad4030': 'mmd4030',
     'mammad4030': 'mmd4030',
+    'milan': 'alireza milan',
+    'alireza milan': 'alireza milan',
+    # ادغام ebrahim در ebi
+    'ebrahim': 'ebi',
+    'ebi': 'ebi',
 }
 
 def resolve_player_name(raw_name):
@@ -98,6 +103,12 @@ def resolve_player_name(raw_name):
 
     if fuzz.ratio(name, 'mmd4030') >= 80 or fuzz.ratio(name, 'mmd 4030') >= 80 or fuzz.ratio(name, 'mamad') >= 85:
         return 'mmd4030'
+
+    if fuzz.ratio(name, 'alireza milan') >= 85 or fuzz.ratio(name, 'milan') >= 90:
+        return 'alireza milan'
+
+    if fuzz.ratio(name, 'ebrahim') >= 85 or fuzz.ratio(name, 'ebi') >= 90:
+        return 'ebi'
 
     return name
 
@@ -298,13 +309,15 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= دیتابیس =================
+# ================= دیتابیس و ادغام کامل حساب‌ها =================
 def merge_player_accounts(cursor):
     merges = {
         'mmd4030': ['mamad', 'mammad', 'mohamad', 'mohammad', 'mmd', 'mmd 4030', 'mohammad 4030', 'mohamad 4030', 'mamad 4030', 'mammad 4030'],
         'omid': ['mohammad a', 'mohamad a', 'mohammad akbar', 'mohamad akbar', 'mohamad akbarnasab'],
         'alireza kamali': ['alireza', 'alireza k'],
-        'hossein ss': ['hossein', 'hosein', 'hosein ss', 'h ss']
+        'hossein ss': ['hossein', 'hosein', 'hosein ss', 'h ss'],
+        'alireza milan': ['milan'],
+        'ebi': ['ebrahim']
     }
 
     for target_name, aliases in merges.items():
@@ -820,14 +833,14 @@ async def flush_batch_worker(chat_id, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(flush_batch_worker(chat_id, context))
 
 async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030)*")
+    await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030, Ebi, Alireza Milan)*")
     return SEARCH_STATE
 
 async def link_profile_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔗 **اتصال نام بازیکن در بازی:**\n"
         "نام انگلیسی خود را که در بازی‌ها ثبت می‌شود وارد کنید:\n"
-        "*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030)*"
+        "*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030, Ebi, Alireza Milan)*"
     )
     return LINK_PROFILE_STATE
 
@@ -989,8 +1002,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
         f"🔹 **هماهنگی کامل رتبه‌ها:** رتبه کارت شخصی دقیقاً برابر با رتبه شما در تالار افتخارات است.\n"
-        f"🔹 **پشتیبانی از تفکیک کانال‌ها:** داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند.\n"
-        f"🔹 **بی‌تفاوتی مطلق به بزرگی و کوچکی حروف:** تمام اسامی یکسان‌سازی شده‌اند.\n\n"
+        f"🔹 **ادغام هوشمند اسامی:** داده‌های Ebrahim، Milan، Mamad و... با حساب اصلی خود یکپارچه شده‌اند.\n"
+        f"🔹 **بی‌تفاوتی مطلق به بزرگی و کوچکی حروف:** تطبیق دقیق بدون حساسیت به فرمت متن.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -1172,7 +1185,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Error sending PDF: {e}")
 
-# ================= نمایش کارت اختصاصی بازیکن (منطبق بر رتبه جدول رسمی) =================
+# ================= نمایش کارت اختصاصی بازیکن =================
 async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name: str):
     query = resolve_player_name(query_name).lower()
 
@@ -1193,7 +1206,6 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
     global_avg_row = c.fetchone()
     m_global = global_avg_row[0] if (global_avg_row and global_avg_row[0] is not None) else 0.50
 
-    # دریافت تمام بازیکنان
     c.execute(f'''
         SELECT 
             p.id,
@@ -1246,7 +1258,6 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
         if tg >= 18:
             ranked_league_list.append(p_obj)
 
-    # مرتب‌سازی رسمی لیگ
     ranked_league_list.sort(key=lambda x: (x['bayes_score'], x['total_games']), reverse=True)
 
     matched_player = None
@@ -1267,7 +1278,6 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
 
     p = matched_player
     
-    # تعیین رتبه بر اساس جدول رسمی لیگ (واجدین بالای ۱۸ بازی)
     official_rank_text = "—"
     if p['total_games'] >= 18:
         for idx, lp in enumerate(ranked_league_list, 1):
@@ -1326,7 +1336,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با هماهنگی کامل رتبه کارت و تالار افتخارات فعال شد...")
+    print("ربات با ادغام کامل سوابق Ebrahim و Ebi فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
