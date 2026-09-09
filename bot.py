@@ -102,10 +102,8 @@ def normalize_text(text):
     for ch in invisible_chars:
         text = text.replace(ch, ' ')
     
-    # تبدیل فونت‌های فانتزی و ریاضی به حروف استاندارد
     text = unicodedata.normalize('NFKD', text)
     
-    # تبدیل کاراکترهای Small Capitals مثل ᴡɪɴ و sᴄᴇɴᴀʀɪᴏ
     small_caps = {
         'ᴀ': 'a', 'ʙ': 'b', 'ᴄ': 'c', 'ᴅ': 'd', 'ᴇ': 'e', 'ғ': 'f', 'ɢ': 'g', 'ʜ': 'h',
         'ɪ': 'i', 'ᴊ': 'j', 'ᴋ': 'k', 'ʟ': 'l', 'ᴍ': 'm', 'ɴ': 'n', 'ᴏ': 'o', 'ᴘ': 'p',
@@ -132,11 +130,9 @@ def make_bar(percent, length=8):
     return "▰" * filled + "▱" * (length - filled)
 
 def extract_roles_from_image(image_bytes):
-    """استخراج هوشمند نقش‌ها با پراکسی PythonAnywhere و سازگار با Random.org"""
     roles_by_seat = {}
     lines = []
 
-    # پیکربندی پروکسی رایگان PythonAnywhere
     proxies = None
     if 'PYTHONANYWHERE_DOMAIN' in os.environ:
         proxies = {
@@ -164,7 +160,7 @@ def extract_roles_from_image(image_bytes):
             parsed_text = result['ParsedResults'][0].get('ParsedText', '')
             lines = [normalize_text(l).strip() for l in parsed_text.splitlines() if l.strip()]
     except Exception as e:
-        print(f"Cloud OCR attempt error: {e}")
+        print(f"Cloud OCR error: {e}")
 
     if not lines and TESSERACT_AVAILABLE:
         try:
@@ -204,7 +200,6 @@ def extract_roles_from_image(image_bytes):
     return roles_by_seat
 
 def infer_scenario(extracted_roles, current_scenario=""):
-    """تشخیص کاملاً خودکار سناریو از روی چیدمان نقش‌ها"""
     sc_clean = current_scenario.strip().lower()
     if sc_clean and len(sc_clean) > 2 and 'کلاسیک' not in sc_clean and 'classic' not in sc_clean:
         return current_scenario
@@ -393,11 +388,12 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         scenario_match = re.search(r'(?:scenario|سناریو)\s*[:•\-_ ]*([^\n\r]+)', norm, re.IGNORECASE)
         win_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_ ]*([^\n\r]+)', norm, re.IGNORECASE)
 
-        if not win_match:
-            return False, "عدم یافتن سطر نتیجه (WIN/برنده) در متن"
-
         event_id = event_match.group(1).strip() if event_match else str(fallback_id)
         raw_scenario = scenario_match.group(1).strip() if scenario_match else ""
+
+        if not win_match:
+            return False, f"ایونت `{event_id}`: سطر نتیجه (WIN/برنده) در متن یافت نشد"
+
         win_text = win_match.group(1).strip().lower()
 
         winning_side = None
@@ -407,11 +403,11 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             winning_side = "Citizen"
 
         if not winning_side:
-            return False, f"ساید برنده از متن '{win_text}' تشخیص داده نشد"
+            return False, f"ایونت `{event_id}`: ساید برنده از متن '{win_text}' تشخیص داده نشد"
 
         players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|❖|☆|$)', norm, re.IGNORECASE)
         if not players_match:
-            return False, "لیست بازیکنان یافت نشد"
+            return False, f"ایونت `{event_id}`: سرفصل لیست بازیکنان پیدا نشد"
 
         players_block = players_match.group(1)
         temp_players = []
@@ -473,7 +469,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             seat_counter += 1
 
         if len(temp_players) < 5:
-            return False, f"تعداد بازیکنان شناسایی شده کمتر از ۵ نفر بود ({len(temp_players)} نفر)"
+            return False, f"ایونت `{event_id}`: تعداد بازیکنان خوانده شده کمتر از ۵ نفر بود ({len(temp_players)} نفر)"
 
         roles_from_image = {}
         ocr_used = False
@@ -502,7 +498,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                 parsed_players.append((p['name'], p['role'].lower(), side))
 
         if len(parsed_players) < 5:
-            return False, "تعداد بازیکنان معتبر کمتر از ۵ نفر بود"
+            return False, f"ایونت `{event_id}`: تعداد بازیکنان معتبر کمتر از ۵ نفر بود"
 
         game_signature = f"ev_{event_id}_sc_{scenario.lower()[:5]}"
 
@@ -535,7 +531,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
 
     except Exception as e:
         print(f"Error parsing event: {e}")
-        return False, str(e)
+        return False, f"خطای سیستمی در تحلیل: {str(e)}"
 
 # ================= ساخت فایل PDF =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="cafe mafia", filename="Mafia_Leaderboard.pdf"):
@@ -619,14 +615,20 @@ async def send_large_text(update_or_chat_id, text, context):
 
     for line in lines:
         if len(current_chunk) + len(line) + 1 > max_len:
-            await context.bot.send_message(chat_id=target_chat, text=current_chunk, parse_mode="Markdown")
+            try:
+                await context.bot.send_message(chat_id=target_chat, text=current_chunk, parse_mode="Markdown")
+            except Exception:
+                await context.bot.send_message(chat_id=target_chat, text=current_chunk)
             current_chunk = line + "\n"
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.4)
         else:
             current_chunk += line + "\n"
 
     if current_chunk.strip():
-        await context.bot.send_message(chat_id=target_chat, text=current_chunk, parse_mode="Markdown")
+        try:
+            await context.bot.send_message(chat_id=target_chat, text=current_chunk, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=target_chat, text=current_chunk)
 
 def get_main_keyboard():
     keyboard = [
@@ -640,7 +642,6 @@ def get_main_keyboard():
 # ================= هندلرهای تلگرام =================
 async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
     global TOTAL_PROCESSED_COUNT
-    await asyncio.sleep(2.5)
 
     batch_data = BATCH_STORAGE.pop(chat_id, [])
     BATCH_TASKS.pop(chat_id, None)
@@ -653,13 +654,19 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
     ch_id, ch_name = get_user_channel(c, chat_id)
     conn.close()
 
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"⏳ در حال پردازش دقیق و استخراج {len(batch_data)} مورد دریافتی... لطفاً صبور باشید."
+    )
+
     added = 0
     accepted_details = []
     rejected_reasons = []
 
     async with DB_LOCK:
         for text, img_bytes, msg_id in batch_data:
-            ok, res = process_game_data(text, img_bytes, msg_id, channel_id=ch_id)
+            # اجرای غیرمسدودکننده برای جلوگیری از هنگ کردن ربات
+            ok, res = await asyncio.to_thread(process_game_data, text, img_bytes, msg_id, ch_id)
             if ok:
                 added += 1
                 accepted_details.append(res)
@@ -674,6 +681,11 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
     all_stored_games = c.fetchone()[0]
     conn.close()
 
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
     summary_text = (
         f"⚡️ **نتیجه بررسی و ثبت بسته ارسالی**\n"
         f"📍 کانال فعال: `{ch_name}`\n"
@@ -682,30 +694,28 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
         f"✨ بازی‌های تایید شده: `{added}`\n"
         f"🔁 رد شده‌ها: `{len(batch_data) - added}`\n"
         f"🏛 کل بازی‌های ثبت‌شده در این کانال: `{all_stored_games}`\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
     if accepted_details:
-        summary_text += "📋 **جزئیات بازی‌های ثبت‌شده:**\n"
+        summary_text += "📋 **بازی‌های جدید ثبت‌شده:**\n"
         for idx, g in enumerate(accepted_details, 1):
-            ocr_status = "📷 نقش‌ها با OCR تصویر" if g['ocr_used'] else "📝 نقش‌ها از متن"
+            ocr_status = "📷 عکس با OCR" if g['ocr_used'] else "📝 متن"
             winner_icon = "🔪 مافیا" if g['winning_side'] == "Mafia" else "🛡 شهروند"
-            summary_text += f"{idx}. ایونت `{g['event_id']}` | سناریو: `{g['scenario']}`\n   ↳ برنده: {winner_icon} | پلیرها: `{g['players_count']}` نفر | منبع: {ocr_status}\n"
+            summary_text += f"{idx}. ایونت `{g['event_id']}` ({g['scenario']}) ⟵ برنده: {winner_icon} [{ocr_status}]\n"
+        summary_text += "\n"
 
     if rejected_reasons:
-        summary_text += "\n⚠️ **علت رد شدن سایر موارد:**\n"
+        summary_text += "⚠️ **دلایل رد شدن سایر موارد:**\n"
         for idx, reason in enumerate(rejected_reasons, 1):
-            summary_text += f"• مورد {idx}: {reason}\n"
+            summary_text += f"• {reason}\n"
 
-    try:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=summary_text,
-            parse_mode="Markdown",
-            reply_markup=get_main_keyboard()
-        )
-    except Exception as e:
-        print(f"Error sending batch summary: {e}")
+    await send_large_text(chat_id, summary_text, context)
+
+async def delayed_flush(chat_id, context: ContextTypes.DEFAULT_TYPE):
+    # تاخیر ۳.۵ ثانیه‌ای از آخرین پیام
+    await asyncio.sleep(3.5)
+    await flush_batch(chat_id, context)
 
 async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030)*")
@@ -853,10 +863,9 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
 
         BATCH_STORAGE[chat_id].append((raw_content, image_bytes, msg.message_id))
 
-        if chat_id in BATCH_TASKS:
-            BATCH_TASKS[chat_id].cancel()
-
-        BATCH_TASKS[chat_id] = asyncio.create_task(flush_batch(chat_id, context))
+        # اگر تسکی از قبل فعال نبود، تسک جدید بساز (جلوگیری از ریست شدن ابدی)
+        if chat_id not in BATCH_TASKS or BATCH_TASKS[chat_id].done():
+            BATCH_TASKS[chat_id] = asyncio.create_task(delayed_flush(chat_id, context))
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name if update.effective_user else "همراه گرامی"
@@ -876,8 +885,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند و می‌توانید کانال جدید ایجاد یا انتخاب کنید.\n\n"
         f"🔹 **تشخیص هوشمند سناریو و پشتیبانی از Classic:**\n"
         f"سناریوها به طور خودکار بر اساس ترکیب نقش‌های مافیا و مستقل استنتاج می‌شوند.\n\n"
-        f"🔹 **موتور OCR ابری قدرتمند:**\n"
-        f"استخراج نقش‌ها حتی از لیست‌های Random.org بدون اشغال فضای سرور.\n\n"
+        f"🔹 **پردازش پایدار بسته‌های سنگین:**\n"
+        f"پشتیبانی از دریافت و آنالیز ده‌ها بازی همزمان و ارسال گزارش کامل بدون محدودیت متن.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -888,7 +897,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📜 **راهنمای جامع سامانه:**\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "▫️ **تغییر کانال:** با زدن «📢 انتخاب / تغییر کانال» کانال مدنظر را انتخاب کنید.\n"
-        "▫️ **ارسال بازی:** متن و عکس ایونت را بفرستید؛ ربات سناریو و نقش‌ها را خودکار استخراج می‌کند."
+        "▫️ **ارسال بازی:** متن و عکس ایونت‌ها را بفرستید؛ پس از اتمام ارسال، گزارش دقیق بررسی ارسال می‌شود."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -970,7 +979,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'm_games': m_games,
             'm_wins': m_wins,
             'c_games': c_games,
-            'c_wins': cw
+            'c_wins': c_wins
         }
         processed_list.append(p_data)
 
@@ -1198,7 +1207,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با سیستم استنتاج خودکار سناریو و پشتیبانی از Classic فعال شد...")
+    print("ربات با موتور استنتاج خودکار سناریو و گزارش‌دهی تضمینی فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
