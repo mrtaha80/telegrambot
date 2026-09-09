@@ -104,7 +104,6 @@ def normalize_text(text):
     for ch in invisible_chars:
         text = text.replace(ch, ' ')
     
-    # تبدیل فونت‌های فانتزی و ریاضی به کاراکترهای نرمال انگلیسی (NFKD)
     text = unicodedata.normalize('NFKD', text)
     
     persian_nums = '۰۱۲۳۴۵۶۷۸۹'
@@ -311,13 +310,12 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
     try:
         norm = normalize_text(raw_text)
 
-        # استخراج پویا و بدون حساسیت به فونت‌های فانتزی
         event_match = re.search(r'(?:event|ایونت)\s*[:#•\-_ ]*([0-9]+)', norm, re.IGNORECASE)
         scenario_match = re.search(r'(?:scenario|سناریو)\s*[:•\-_ ]*([^\n\r]+)', norm, re.IGNORECASE)
         win_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_ ]*([^\n\r]+)', norm, re.IGNORECASE)
 
         if not scenario_match or not win_match:
-            return False
+            return False, "عدم یافتن سناریو یا برنده در پیام"
 
         event_id = event_match.group(1).strip() if event_match else str(fallback_id)
         scenario = scenario_match.group(1).strip()
@@ -330,11 +328,11 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             winning_side = "Citizen"
 
         if not winning_side:
-            return False
+            return False, "ساید برنده (مافیا یا شهروند) مشخص نیست"
 
         players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|$)', norm, re.IGNORECASE)
         if not players_match:
-            return False
+            return False, "لیست بازیکنان پیدا نشد"
 
         players_block = players_match.group(1)
         temp_players = []
@@ -362,7 +360,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             clean_line = re.sub(r'[👈👉].*$', '', clean_line).strip()
             clean_line = re.sub(r'\(.*?\)', '', clean_line).strip()
 
-            # استخراج پویا: نام انگلیسی در ابتدا و نقش فارسی در انتها
             lang_split = re.search(r'^([a-zA-Z0-9\.\s_-]+)([\u0600-\u06FF\s].*)$', clean_line)
             if lang_split:
                 name = lang_split.group(1).strip()
@@ -395,11 +392,14 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             seat_counter += 1
 
         if len(temp_players) < 5:
-            return False
+            return False, f"تعداد بازیکنان شناسایی شده کمتر از ۵ نفر بود ({len(temp_players)} نفر)"
 
         roles_from_image = {}
+        ocr_used = False
         if needs_image_ocr and image_bytes:
             roles_from_image = extract_roles_from_image(image_bytes)
+            if roles_from_image:
+                ocr_used = True
 
         parsed_players = []
         for p in temp_players:
@@ -415,9 +415,8 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                 parsed_players.append((p['name'], final_role.lower(), side))
 
         if len(parsed_players) < 5:
-            return False
+            return False, "تعداد بازیکنان معتبر غیرمستقل کمتر از ۵ نفر بود"
 
-        # امضای کاملاً پویا جهت جلوگیری از تکرار اشتباه
         game_signature = f"ev_{event_id}_sc_{scenario.lower()[:5]}"
 
         conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
@@ -437,11 +436,19 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         c.execute("INSERT OR REPLACE INTO processed_games (game_signature, channel_id) VALUES (?, ?)", (game_signature, channel_id))
         conn.commit()
         conn.close()
-        return True
+
+        detail_info = {
+            'event_id': event_id,
+            'scenario': scenario,
+            'winning_side': winning_side,
+            'players_count': len(parsed_players),
+            'ocr_used': ocr_used
+        }
+        return True, detail_info
 
     except Exception as e:
         print(f"Error parsing event: {e}")
-        return False
+        return False, str(e)
 
 # ================= ساخت فایل PDF =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="cafe mafia", filename="Mafia_Leaderboard.pdf"):
@@ -560,10 +567,17 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     added = 0
+    accepted_details = []
+    rejected_reasons = []
+
     async with DB_LOCK:
         for text, img_bytes, msg_id in batch_data:
-            if process_game_data(text, img_bytes, msg_id, channel_id=ch_id):
+            ok, res = process_game_data(text, img_bytes, msg_id, channel_id=ch_id)
+            if ok:
                 added += 1
+                accepted_details.append(res)
+            else:
+                rejected_reasons.append(str(res))
 
     TOTAL_PROCESSED_COUNT += added
 
@@ -573,18 +587,33 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
     all_stored_games = c.fetchone()[0]
     conn.close()
 
+    summary_text = (
+        f"⚡️ **نتیجه بررسی و ثبت بسته ارسالی**\n"
+        f"📍 کانال فعال: `{ch_name}`\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📥 کل فایل‌ها و پیام‌ها: `{len(batch_data)}`\n"
+        f"✨ بازی‌های تایید شده: `{added}`\n"
+        f"🔁 رد شده‌ها: `{len(batch_data) - added}`\n"
+        f"🏛 کل بازی‌های ثبت‌شده در این کانال: `{all_stored_games}`\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    if accepted_details:
+        summary_text += "📋 **جزئیات بازی‌های ثبت‌شده:**\n"
+        for idx, g in enumerate(accepted_details, 1):
+            ocr_status = "📷 نقش‌ها با OCR تصویر" if g['ocr_used'] else "📝 نقش‌ها از متن"
+            winner_icon = "🔪 مافیا" if g['winning_side'] == "Mafia" else "🛡 شهروند"
+            summary_text += f"{idx}. ایونت `{g['event_id']}` | سناریو: `{g['scenario']}`\n   ↳ برنده: {winner_icon} | پلیرها: `{g['players_count']}` نفر | منبع: {ocr_status}\n"
+
+    if rejected_reasons:
+        summary_text += "\n⚠️ **علت رد شدن سایر موارد:**\n"
+        for idx, reason in enumerate(rejected_reasons, 1):
+            summary_text += f"• مورد {idx}: {reason}\n"
+
     try:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=(
-                f"⚡️ **بسته با موفقیت آنالیز شد!**\n"
-                f"📍 کانال فعال: `{ch_name}`\n"
-                f"━━━━━━━━━━━━━━━━━━━\n"
-                f"📥 کل پیام‌های دریافتی: `{len(batch_data)}`\n"
-                f"✨ بازی‌های جدید تایید شده: `{added}`\n"
-                f"🔁 بازی‌های رد شده: `{len(batch_data) - added}`\n"
-                f"🏛 کل نبردهای این کانال: `{all_stored_games}`"
-            ),
+            text=summary_text,
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
@@ -1085,7 +1114,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با پارسر پویا، سبک و اولویت استخراج متنی و سپس تصویری فعال شد...")
+    print("ربات با سیستم گزارش تحلیلی کامل بسته فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
