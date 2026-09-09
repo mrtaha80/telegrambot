@@ -54,25 +54,17 @@ SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫�
 # فقط ali و sara نادیده گرفته می‌شوند
 EXCLUDED_PLAYERS = {'ali', 'sara'}
 
-# دیکشنری نگاشت مستقیم اسامی
 PLAYER_ALIASES = {
-    # ادغام به omid
     'mohammad a': 'omid',
     'mohamad a': 'omid',
     'mohammad akbar': 'omid',
     'mohamad akbar': 'omid',
     'mohamad akbarnasab': 'omid',
-
-    # ادغام به alireza kamali
     'alireza': 'alireza kamali',
     'alireza k': 'alireza kamali',
-
-    # ادغام به hossein ss
     'hossein': 'hossein ss',
     'hosein': 'hossein ss',
     'hosein ss': 'hossein ss',
-
-    # ادغام انواع محمد و ممد به mmd4030
     'mmd': 'mmd4030',
     'mmd 4030': 'mmd4030',
     'mmd-4030': 'mmd4030',
@@ -111,7 +103,10 @@ def normalize_text(text):
     invisible_chars = ['\u200b', '\u200c', '\u200d', '\u200e', '\u200f', '\ufeff', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e']
     for ch in invisible_chars:
         text = text.replace(ch, ' ')
+    
+    # تبدیل فونت‌های فانتزی و ریاضی به کاراکترهای نرمال انگلیسی (NFKD)
     text = unicodedata.normalize('NFKD', text)
+    
     persian_nums = '۰۱۲۳۴۵۶۷۸۹'
     for i, p in enumerate(persian_nums):
         text = text.replace(p, str(i))
@@ -225,32 +220,6 @@ def init_db():
     for target in target_names:
         c.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (target,))
 
-    c.execute("SELECT id, LOWER(name) FROM players")
-    all_current_players = c.fetchall()
-
-    for p_id, p_name in all_current_players:
-        resolved = resolve_player_name(p_name)
-        if resolved and resolved != p_name and resolved in target_names:
-            c.execute("SELECT id FROM players WHERE LOWER(name) = ?", (resolved,))
-            res_row = c.fetchone()
-            if res_row:
-                target_id = res_row[0]
-                c.execute("UPDATE OR IGNORE matches SET player_id = ? WHERE player_id = ?", (target_id, p_id))
-                c.execute("DELETE FROM matches WHERE player_id = ?", (p_id,))
-                c.execute("DELETE FROM players WHERE id = ?", (p_id,))
-
-    placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
-    c.execute(f'''
-        DELETE FROM matches 
-        WHERE player_id IN (
-            SELECT id FROM players WHERE LOWER(name) IN ({placeholders})
-        )
-    ''', list(EXCLUDED_PLAYERS))
-    
-    c.execute(f'''
-        DELETE FROM players WHERE LOWER(name) IN ({placeholders})
-    ''', list(EXCLUDED_PLAYERS))
-
     conn.commit()
     conn.close()
 
@@ -342,9 +311,10 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
     try:
         norm = normalize_text(raw_text)
 
-        event_match = re.search(r'(?:event|ایونت|event\s*#)\s*[:#•\-_ ]*([0-9]+)', norm, re.IGNORECASE)
-        scenario_match = re.search(r'(?:scenario|سناریو)\s*[:•\-_]\s*([^\n\r]+)', norm, re.IGNORECASE)
-        win_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_]\s*([^\n\r]+)', norm, re.IGNORECASE)
+        # استخراج پویا و بدون حساسیت به فونت‌های فانتزی
+        event_match = re.search(r'(?:event|ایونت)\s*[:#•\-_ ]*([0-9]+)', norm, re.IGNORECASE)
+        scenario_match = re.search(r'(?:scenario|سناریو)\s*[:•\-_ ]*([^\n\r]+)', norm, re.IGNORECASE)
+        win_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_ ]*([^\n\r]+)', norm, re.IGNORECASE)
 
         if not scenario_match or not win_match:
             return False
@@ -392,8 +362,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             clean_line = re.sub(r'[👈👉].*$', '', clean_line).strip()
             clean_line = re.sub(r'\(.*?\)', '', clean_line).strip()
 
-            # تفکیک اسم و نقش از متن
-            role = ""
+            # استخراج پویا: نام انگلیسی در ابتدا و نقش فارسی در انتها
             lang_split = re.search(r'^([a-zA-Z0-9\.\s_-]+)([\u0600-\u06FF\s].*)$', clean_line)
             if lang_split:
                 name = lang_split.group(1).strip()
@@ -415,7 +384,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                 seat_counter += 1
                 continue
 
-            # اگر نقش در متن نبود یا خالی بود، نیاز به OCR بررسی می‌شود
             if not role:
                 needs_image_ocr = True
 
@@ -429,7 +397,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         if len(temp_players) < 5:
             return False
 
-        # اولویت دوم: استخراج از تصویر در صورتی که نقش در متن نبود
         roles_from_image = {}
         if needs_image_ocr and image_bytes:
             roles_from_image = extract_roles_from_image(image_bytes)
@@ -437,7 +404,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         parsed_players = []
         for p in temp_players:
             final_role = p['role']
-            # اگر در متن نقش نبود، از عکس می‌خواند
             if not final_role:
                 if p['seat'] in roles_from_image:
                     final_role = roles_from_image[p['seat']]
@@ -451,22 +417,11 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         if len(parsed_players) < 5:
             return False
 
-        # ساخت امضای بازی مستقیماً با کانال و شماره ایونت
-        if event_id and event_id != "0":
-            game_identity = f"ch_{channel_id}_ev_{event_id}"
-        else:
-            players_fingerprint = "-".join(sorted([f"{p[0]}:{p[1]}" for p in parsed_players]))
-            game_identity = f"ch_{channel_id}_{scenario.lower()}_{winning_side}_{players_fingerprint}"
-        
-        game_signature = hashlib.sha256(game_identity.encode('utf-8')).hexdigest()
+        # امضای کاملاً پویا جهت جلوگیری از تکرار اشتباه
+        game_signature = f"ev_{event_id}_sc_{scenario.lower()[:5]}"
 
         conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
         c = conn.cursor()
-
-        c.execute("SELECT 1 FROM processed_games WHERE game_signature = ? AND channel_id = ?", (game_signature, channel_id))
-        if c.fetchone():
-            conn.close()
-            return False
 
         for name, role, side in parsed_players:
             player_id, _ = get_or_create_player(c, name)
@@ -479,7 +434,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (player_id, channel_id, game_signature, event_id, scenario, side, is_win))
 
-        c.execute("INSERT OR IGNORE INTO processed_games (game_signature, channel_id) VALUES (?, ?)", (game_signature, channel_id))
+        c.execute("INSERT OR REPLACE INTO processed_games (game_signature, channel_id) VALUES (?, ?)", (game_signature, channel_id))
         conn.commit()
         conn.close()
         return True
@@ -627,7 +582,7 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"📥 کل پیام‌های دریافتی: `{len(batch_data)}`\n"
                 f"✨ بازی‌های جدید تایید شده: `{added}`\n"
-                f"🔁 بازی‌های تکراری رد شده: `{len(batch_data) - added}`\n"
+                f"🔁 بازی‌های رد شده: `{len(batch_data) - added}`\n"
                 f"🏛 کل نبردهای این کانال: `{all_stored_games}`"
             ),
             parse_mode="Markdown",
@@ -807,8 +762,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"با زدن «🔗 اتصال نام بازی من»، نام خود را متصل کنید تا با زدن «👤 کارنامه من» آمار اختصاصی‌تان را ببینید.\n\n"
         f"🔹 **الگوریتم بیزی با ضریب ثبات سنگین:**\n"
         f"ثبات در تعداد بازی‌های بالا ارزش‌گذاری می‌شود.\n\n"
-        f"🔹 **موتور OCR تطبیق تصویر هوشمند:**\n"
-        f"اول اطلاعات از متن دریافت می‌شود و در صورت نبودن نقش‌ها در متن، نقش‌ها مستقیماً از عکس ۱ تا ۱۰ اسکن و هماهنگ می‌گردند.\n\n"
+        f"🔹 **موتور OCR تطبیق تصویر پویا:**\n"
+        f"استخراج هوشمند نقش‌های فارسی و متن و تطبیق از تصویر.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -820,7 +775,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "▫️ **تغییر کانال:** قبل از ارسال بازی، با زدن «📢 انتخاب / تغییر کانال» مشخص کنید داده‌ها متعلق به کدام کانال است.\n"
         "▫️ **کارنامه شخصی:** با زدن «🔗 اتصال نام بازی من» اسمتان را متصل کنید تا با «👤 کارنامه من» آمار خود را ببینید.\n"
-        "▫️ **ارسال بازی:** متن و عکس ایونت را ارسال کنید تا در کانال فعال ثبت شود (نقش‌ها در صورت نبود در متن، از عکس خوانده می‌شوند)."
+        "▫️ **ارسال بازی:** متن و عکس ایونت را ارسال کنید تا در کانال فعال ثبت شود."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -1130,7 +1085,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با اولویت استخراج متنی و سپس OCR تصویر فعال شد...")
+    print("ربات با پارسر پویا، سبک و اولویت استخراج متنی و سپس تصویری فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
