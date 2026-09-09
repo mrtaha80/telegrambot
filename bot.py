@@ -221,7 +221,6 @@ def init_db():
         )
     ''')
 
-    # ادغام اسامی
     target_names = {'omid', 'alireza kamali', 'hossein ss', 'mmd4030'}
     for target in target_names:
         c.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (target,))
@@ -240,7 +239,6 @@ def init_db():
                 c.execute("DELETE FROM matches WHERE player_id = ?", (p_id,))
                 c.execute("DELETE FROM players WHERE id = ?", (p_id,))
 
-    # حذف ali و sara
     placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
     c.execute(f'''
         DELETE FROM matches 
@@ -364,17 +362,14 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         if not winning_side:
             return False
 
-        roles_from_image = {}
-        if image_bytes:
-            roles_from_image = extract_roles_from_image(image_bytes)
-
         players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|$)', norm, re.IGNORECASE)
         if not players_match:
             return False
 
         players_block = players_match.group(1)
-        parsed_players = []
+        temp_players = []
         seat_counter = 1
+        needs_image_ocr = False
 
         for line in players_block.strip().splitlines():
             line = line.strip()
@@ -397,6 +392,8 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             clean_line = re.sub(r'[👈👉].*$', '', clean_line).strip()
             clean_line = re.sub(r'\(.*?\)', '', clean_line).strip()
 
+            # تفکیک اسم و نقش از متن
+            role = ""
             lang_split = re.search(r'^([a-zA-Z0-9\.\s_-]+)([\u0600-\u06FF\s].*)$', clean_line)
             if lang_split:
                 name = lang_split.group(1).strip()
@@ -408,25 +405,48 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                     role = " ".join(tokens[1:])
                 else:
                     name = clean_line
-                    role = "ساده"
-
-            if current_seat in roles_from_image:
-                role = roles_from_image[current_seat]
+                    role = ""
 
             if not name or len(name) < 2 or not re.search(r'[a-zA-Z\u0600-\u06FF]', name):
                 continue
 
             name_lower = resolve_player_name(name)
-
             if name_lower in EXCLUDED_PLAYERS:
                 seat_counter += 1
                 continue
 
-            side = detect_side(scenario, role)
-            if side != "Independent":
-                parsed_players.append((name_lower, role.lower(), side))
+            # اگر نقش در متن نبود یا خالی بود، نیاز به OCR بررسی می‌شود
+            if not role:
+                needs_image_ocr = True
 
+            temp_players.append({
+                'seat': current_seat,
+                'name': name_lower,
+                'role': role
+            })
             seat_counter += 1
+
+        if len(temp_players) < 5:
+            return False
+
+        # اولویت دوم: استخراج از تصویر در صورتی که نقش در متن نبود
+        roles_from_image = {}
+        if needs_image_ocr and image_bytes:
+            roles_from_image = extract_roles_from_image(image_bytes)
+
+        parsed_players = []
+        for p in temp_players:
+            final_role = p['role']
+            # اگر در متن نقش نبود، از عکس می‌خواند
+            if not final_role:
+                if p['seat'] in roles_from_image:
+                    final_role = roles_from_image[p['seat']]
+                else:
+                    final_role = "ساده"
+
+            side = detect_side(scenario, final_role)
+            if side != "Independent":
+                parsed_players.append((p['name'], final_role.lower(), side))
 
         if len(parsed_players) < 5:
             return False
@@ -787,8 +807,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"با زدن «🔗 اتصال نام بازی من»، نام خود را متصل کنید تا با زدن «👤 کارنامه من» آمار اختصاصی‌تان را ببینید.\n\n"
         f"🔹 **الگوریتم بیزی با ضریب ثبات سنگین:**\n"
         f"ثبات در تعداد بازی‌های بالا ارزش‌گذاری می‌شود.\n\n"
-        f"🔹 **موتور OCR تطبیق تصویر:**\n"
-        f"اسکن نقش‌ها از عکس ۱ تا ۱۰ و تطبیق مستقیم با متن.\n\n"
+        f"🔹 **موتور OCR تطبیق تصویر هوشمند:**\n"
+        f"اول اطلاعات از متن دریافت می‌شود و در صورت نبودن نقش‌ها در متن، نقش‌ها مستقیماً از عکس ۱ تا ۱۰ اسکن و هماهنگ می‌گردند.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -800,7 +820,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "▫️ **تغییر کانال:** قبل از ارسال بازی، با زدن «📢 انتخاب / تغییر کانال» مشخص کنید داده‌ها متعلق به کدام کانال است.\n"
         "▫️ **کارنامه شخصی:** با زدن «🔗 اتصال نام بازی من» اسمتان را متصل کنید تا با «👤 کارنامه من» آمار خود را ببینید.\n"
-        "▫️ **ارسال بازی:** متن و عکس ایونت را فوروارد کنید تا در کانال فعال ثبت شود."
+        "▫️ **ارسال بازی:** متن و عکس ایونت را ارسال کنید تا در کانال فعال ثبت شود (نقش‌ها در صورت نبود در متن، از عکس خوانده می‌شوند)."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -878,7 +898,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'total_games': total_g,
             'total_wins': total_w,
             'raw_win': raw_win,
-            'bayes_score': base_score,
+            'bayes_score': bayes_score,
             'm_games': m_games,
             'm_wins': m_wins,
             'c_games': c_games,
@@ -1110,7 +1130,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با ادغام تمام حالات محمد و ممد به mmd4030 فعال شد...")
+    print("ربات با اولویت استخراج متنی و سپس OCR تصویر فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
