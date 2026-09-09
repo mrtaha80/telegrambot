@@ -81,7 +81,6 @@ PLAYER_ALIASES = {
     'mammad4030': 'mmd4030',
     'milan': 'alireza milan',
     'alireza milan': 'alireza milan',
-    # ادغام ebrahim در ebi
     'ebrahim': 'ebi',
     'ebi': 'ebi',
 }
@@ -648,19 +647,20 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         print(f"Error parsing event: {e}")
         return False, f"خطای سیستمی: {str(e)}"
 
-# ================= ساخت فایل PDF =================
+# ================= ساخت فایل PDF حرفه‌ای و ۱۰ نفر برتر هر ساید =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="cafe mafia", filename="Mafia_Leaderboard.pdf"):
-    doc = SimpleDocTemplate(filename, pagesize=letter, rightMargin=32, leftMargin=32, topMargin=32, bottomMargin=32)
+    doc = SimpleDocTemplate(filename, pagesize=letter, rightMargin=24, leftMargin=24, topMargin=24, bottomMargin=24)
     elements = []
     styles = getSampleStyleSheet()
 
-    title_style = ParagraphStyle('MainTitle', parent=styles['Heading1'], fontSize=20, leading=24, textColor=colors.HexColor('#0F172A'), alignment=1, spaceAfter=4)
-    subtitle_style = ParagraphStyle('SubTitle', parent=styles['Normal'], fontSize=10, textColor=colors.HexColor('#475569'), alignment=1, spaceAfter=16)
-    section_style = ParagraphStyle('SectionHeading', parent=styles['Heading2'], fontSize=12, leading=15, textColor=colors.HexColor('#0F172A'), spaceBefore=12, spaceAfter=8)
+    title_style = ParagraphStyle('MainTitle', parent=styles['Heading1'], fontSize=18, leading=22, textColor=colors.HexColor('#0F172A'), alignment=1, spaceAfter=2)
+    subtitle_style = ParagraphStyle('SubTitle', parent=styles['Normal'], fontSize=9, textColor=colors.HexColor('#475569'), alignment=1, spaceAfter=12)
+    section_style = ParagraphStyle('SectionHeading', parent=styles['Heading2'], fontSize=11, leading=14, textColor=colors.HexColor('#1E293B'), spaceBefore=8, spaceAfter=6)
 
     elements.append(Paragraph(f"👑 <b>CAFE MAFIA GRAND CHAMPIONSHIP</b> 👑", title_style))
     elements.append(Paragraph(f"League / Channel: <b>{channel_name.upper()}</b> • Bayesian Volume Regularization", subtitle_style))
 
+    # جدول لیدربرد کل
     table_data = [["Rank", "Player", "Matches", "Bayesian Pts", "Win Rate", "Mafia (W/G)", "Citizen (W/G)"]]
     for idx, p in enumerate(results, 1):
         m_rate = (p['m_wins'] * 100 // p['m_games']) if p['m_games'] > 0 else 0
@@ -677,45 +677,46 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="c
             f"{c_rate}% ({p['c_wins']}/{p['c_games']})"
         ])
 
-    main_table = Table(table_data, colWidths=[40, 125, 52, 78, 65, 95, 95])
+    main_table = Table(table_data, colWidths=[35, 125, 52, 75, 60, 105, 105])
     main_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0B132B')),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F172A')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#F8FAFC')),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ('ALIGN', (1, 1), (1, -1), 'LEFT'),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 9),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 7),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#F8FAFC'), colors.HexColor('#EDF2F7')]),
+        ('FONTSIZE', (0, 0), (-1, 0), 8.5),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#F8FAFC'), colors.HexColor('#F1F5F9')]),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
-        ('FONTSIZE', (0, 1), (-1, -1), 8.5),
-        ('TOPPADDING', (0, 1), (-1, -1), 5),
-        ('BOTTOMPADDING', (0, 1), (-1, -1), 5),
+        ('FONTSIZE', (0, 1), (-1, -1), 8),
+        ('TOPPADDING', (0, 1), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
     ]))
     elements.append(main_table)
-    elements.append(Spacer(1, 14))
+    elements.append(Spacer(1, 10))
 
-    elements.append(Paragraph("⚔️ <b>Elite Side Specialists (Minimum 9 Side Games)</b>", section_style))
-    top_side_data = [["🔥 Top Mafia Syndicate", "🛡 Top Citizen Alliance"]]
-    max_len = max(len(mafia_leaders[:5]), len(citizen_leaders[:5]))
+    # جدول ۱۰ بازیکن برتر هر ساید
+    elements.append(Paragraph("⚔️ <b>Elite Side Specialists — Top 10 Players (Min 9 Side Games)</b>", section_style))
+    top_side_data = [["🔥 Top 10 Mafia Syndicate", "🛡 Top 10 Citizen Alliance"]]
+    max_len = max(len(mafia_leaders[:10]), len(citizen_leaders[:10]))
 
     for i in range(max_len):
-        m_txt = f"{i+1}. {mafia_leaders[i]['name'].title()} — <b>{mafia_leaders[i]['bayes']:.2f} Pts</b> ({mafia_leaders[i]['wins']}/{mafia_leaders[i]['games']} W)" if i < len(mafia_leaders[:5]) else ""
-        c_txt = f"{i+1}. {citizen_leaders[i]['name'].title()} — <b>{citizen_leaders[i]['bayes']:.2f} Pts</b> ({citizen_leaders[i]['wins']}/{citizen_leaders[i]['games']} W)" if i < len(citizen_leaders[:5]) else ""
+        m_txt = f"{i+1}. {mafia_leaders[i]['name'].title()} — <b>{mafia_leaders[i]['bayes']:.2f} Pts</b> ({mafia_leaders[i]['wins']}/{mafia_leaders[i]['games']} W)" if i < len(mafia_leaders[:10]) else ""
+        c_txt = f"{i+1}. {citizen_leaders[i]['name'].title()} — <b>{citizen_leaders[i]['bayes']:.2f} Pts</b> ({citizen_leaders[i]['wins']}/{citizen_leaders[i]['games']} W)" if i < len(citizen_leaders[:10]) else ""
         top_side_data.append([Paragraph(m_txt, styles['Normal']), Paragraph(c_txt, styles['Normal'])])
 
-    side_table = Table(top_side_data, colWidths=[275, 275])
+    side_table = Table(top_side_data, colWidths=[278, 278])
     side_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (0, 0), colors.HexColor('#991B1B')),
-        ('BACKGROUND', (1, 0), (1, 0), colors.HexColor('#1E40AF')),
+        ('BACKGROUND', (0, 0), (0, 0), colors.HexColor('#7F1D1D')),
+        ('BACKGROUND', (1, 0), (1, 0), colors.HexColor('#1E3A8A')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 9.5),
+        ('FONTSIZE', (0, 0), (-1, 0), 8.5),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('TOPPADDING', (0, 0), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ('LEFTPADDING', (0, 0), (-1, -1), 6),
     ]))
     elements.append(side_table)
 
@@ -1001,9 +1002,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
+        f"🔹 **۱۰ بازیکن برتر هر ساید:** نمایش تخصصی ۱۰ شکارچی برتر مافیا و ۱۰ قهرمان برتر شهروند در PDF.\n"
         f"🔹 **هماهنگی کامل رتبه‌ها:** رتبه کارت شخصی دقیقاً برابر با رتبه شما در تالار افتخارات است.\n"
-        f"🔹 **ادغام هوشمند اسامی:** داده‌های Ebrahim، Milan، Mamad و... با حساب اصلی خود یکپارچه شده‌اند.\n"
-        f"🔹 **بی‌تفاوتی مطلق به بزرگی و کوچکی حروف:** تطبیق دقیق بدون حساسیت به فرمت متن.\n\n"
+        f"🔹 **ادغام هوشمند و بی‌تفاوتی به حروف:** تطبیق دقیق بدون حساسیت به فرمت متن.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -1018,7 +1019,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-# ================= گزارش رسمی و لیدربرد =================
+# ================= گزارش رسمی و لیدربرد (با ۱۰ بازیکن برتر هر ساید) =================
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
@@ -1154,18 +1155,18 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report += f"🔪 مافیا: `{m_rate}%` ({p['m_wins']}/{p['m_games']}) | 🛡 شهر: `{c_rate}%` ({p['c_wins']}/{p['c_games']})\n"
         report += "──────────────────────────\n"
 
-    report += "\n🔥 **۵ شکارچی برتر ساید مافیا:**\n"
+    report += "\n🔥 **۱۰ شکارچی برتر ساید مافیا:**\n"
     if mafia_candidates:
-        medals = ["👑", "🩸", "💀", "🗡", "🎯"]
-        for r, m in enumerate(mafia_candidates[:5], 1):
+        medals = ["👑", "🩸", "💀", "🗡", "🎯", "🔥", "⚡️", "💎", "🌟", "⚜️"]
+        for r, m in enumerate(mafia_candidates[:10], 1):
             report += f"{medals[r-1]} {r}. **{m['name'].title()}** ⟵ نمره: `{m['bayes']:.2f}` (برد: `{m['rate']}%` در `{m['games']}` بازی)\n"
     else:
         report += "بازیکنی با حداقل ۹ بازی مافیا یافت نشد.\n"
 
-    report += "\n🛡 **۵ قهرمان برتر ساید شهروند:**\n"
+    report += "\n🛡 **۱۰ قهرمان برتر ساید شهروند:**\n"
     if citizen_candidates:
-        shields = ["🌟", "💎", "✨", "🛡", "⚜️"]
-        for r, c_item in enumerate(citizen_candidates[:5], 1):
+        shields = ["🌟", "💎", "✨", "🛡", "⚜️", "👑", "🎯", "🔥", "⚡️", "🏆"]
+        for r, c_item in enumerate(citizen_candidates[:10], 1):
             report += f"{shields[r-1]} {r}. **{c_item['name'].title()}** ⟵ نمره: `{c_item['bayes']:.2f}` (برد: `{c_item['rate']}%` در `{c_item['games']}` بازی)\n"
     else:
         report += "بازیکنی با حداقل ۹ بازی شهروندی یافت نشد.\n"
@@ -1336,7 +1337,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با ادغام کامل سوابق Ebrahim و Ebi فعال شد...")
+    print("ربات با گزارش PDF حرفه‌ای و ۱۰ بازیکن برتر هر ساید فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
