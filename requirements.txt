@@ -1,3 +1,7 @@
 python-telegram-bot
 fuzzywuzzy
 python-Levenshtein
+reportlab
+pillow
+numpy
+easyocr
