@@ -73,9 +73,16 @@ PLAYER_ALIASES = {
     'mohamad 4030': 'mmd4030',
     'mohammad4030': 'mmd4030',
     'mohamad4030': 'mmd4030',
+    'mamad': 'mmd4030',
+    'mammad': 'mmd4030',
+    'mamad 4030': 'mmd4030',
+    'mammad 4030': 'mmd4030',
+    'mamad4030': 'mmd4030',
+    'mammad4030': 'mmd4030',
 }
 
 def resolve_player_name(raw_name):
+    # تبدیل به حروف کوچک و یکسان‌سازی بدون حساسیت به حروف
     name = raw_name.strip().lower()
     name = re.sub(rf'[{SEAT_SYMBOLS}]', '', name)
     name = re.sub(r'[\.\-_:⚜️👑💥☆•]', ' ', name)
@@ -87,10 +94,10 @@ def resolve_player_name(raw_name):
     if name in PLAYER_ALIASES:
         return PLAYER_ALIASES[name]
 
-    if re.search(r'^(mmd|moham+ad)(\s*4030)?$', name):
+    if re.search(r'^(mmd|moham+ad|mam+ad)(\s*4030)?$', name):
         return 'mmd4030'
 
-    if fuzz.ratio(name, 'mmd4030') >= 80 or fuzz.ratio(name, 'mmd 4030') >= 80:
+    if fuzz.ratio(name, 'mmd4030') >= 80 or fuzz.ratio(name, 'mmd 4030') >= 80 or fuzz.ratio(name, 'mamad') >= 85:
         return 'mmd4030'
 
     return name
@@ -138,7 +145,6 @@ def make_bar(percent, length=8):
     return "▰" * filled + "▱" * (length - filled)
 
 def extract_roles_from_image(image_bytes):
-    """استخراج ابری پایدار نقش‌ها با بهینه‌سازی سایز عکس و مهلت ارتباط ۳۰ ثانیه"""
     roles_by_seat = {}
     lines = []
 
@@ -149,7 +155,6 @@ def extract_roles_from_image(image_bytes):
             'https': 'http://proxy.server:3128',
         }
 
-    # بهینه‌سازی و کم کردن حجم عکس برای آپلود فوری
     optimized_bytes = image_bytes
     try:
         pil_img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
@@ -294,7 +299,44 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= دیتابیس =================
+# ================= دیتابیس بدون حساسیت به حروف (NOCASE) =================
+def merge_player_accounts(cursor):
+    merges = {
+        'mmd4030': ['mamad', 'mammad', 'mohamad', 'mohammad', 'mmd', 'mmd 4030', 'mohammad 4030', 'mohamad 4030', 'mamad 4030', 'mammad 4030'],
+        'omid': ['mohammad a', 'mohamad a', 'mohammad akbar', 'mohamad akbar', 'mohamad akbarnasab'],
+        'alireza kamali': ['alireza', 'alireza k'],
+        'hossein ss': ['hossein', 'hosein', 'hosein ss', 'h ss']
+    }
+
+    for target_name, aliases in merges.items():
+        cursor.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (target_name.lower(),))
+        cursor.execute("SELECT id FROM players WHERE LOWER(name) = ?", (target_name.lower(),))
+        row = cursor.fetchone()
+        if not row:
+            continue
+        target_id = row[0]
+
+        placeholders = ','.join(['?'] * len(aliases))
+        cursor.execute(f"SELECT id, name FROM players WHERE LOWER(name) IN ({placeholders}) AND id != ?", [a.lower() for a in aliases] + [target_id])
+        alias_players = cursor.fetchall()
+
+        for alias_id, alias_raw in alias_players:
+            cursor.execute('''
+                UPDATE OR IGNORE matches 
+                SET player_id = ? 
+                WHERE player_id = ?
+            ''', (target_id, alias_id))
+
+            cursor.execute("DELETE FROM matches WHERE player_id = ?", (alias_id,))
+
+            cursor.execute('''
+                UPDATE user_linked_players 
+                SET player_name = ? 
+                WHERE LOWER(player_name) = ?
+            ''', (target_name.lower(), alias_raw.lower()))
+
+            cursor.execute("DELETE FROM players WHERE id = ?", (alias_id,))
+
 def init_db():
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
@@ -363,9 +405,7 @@ def init_db():
         except Exception:
             pass
 
-    target_names = {'omid', 'alireza kamali', 'hossein ss', 'mmd4030'}
-    for target in target_names:
-        c.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (target,))
+    merge_player_accounts(c)
 
     conn.commit()
     conn.close()
@@ -427,7 +467,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         event_id = clean_event_id(raw_event)
         raw_scenario = scenario_match.group(1).strip() if scenario_match else ""
 
-        # استخراج هوشمند و چندخطی برنده بازی
         win_block_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_ ]*([\s\S]*?)(?:mvp|☆|★|✦|━|─|$)', norm, re.IGNORECASE)
         if not win_block_match:
             return False, f"ایونت `{event_id}`: سطر برنده بازی پیدا نشد"
@@ -507,6 +546,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             if not name or len(name) < 2 or not re.search(r'[a-zA-Z\u0600-\u06FF]', name):
                 continue
 
+            # تبدیل کامل به حروف کوچک برای برابری قطعی
             name_lower = resolve_player_name(name)
             if name_lower in EXCLUDED_PLAYERS:
                 seat_counter += 1
@@ -550,7 +590,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         for p in temp_players:
             side = detect_side(scenario, p['role'])
             if side != "Independent":
-                parsed_players.append((p['name'], p['role'].lower(), side))
+                parsed_players.append((p['name'].lower(), p['role'].lower(), side))
 
         if len(parsed_players) < 5:
             conn.close()
@@ -806,7 +846,7 @@ async def link_profile_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c.execute('''
         INSERT OR REPLACE INTO user_linked_players (telegram_user_id, player_name)
         VALUES (?, ?)
-    ''', (user_id, player_name))
+    ''', (user_id, player_name.lower()))
     conn.commit()
     conn.close()
 
@@ -872,7 +912,7 @@ async def my_profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
-    c.execute("SELECT player_name FROM user_linked_players WHERE telegram_user_id = ?", (user_id,))
+    c.execute("SELECT LOWER(player_name) FROM user_linked_players WHERE telegram_user_id = ?", (user_id,))
     row = c.fetchone()
     ch_id, ch_name = get_user_channel(c, user_id)
     conn.close()
@@ -952,10 +992,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🌟 **ویژگی‌های سامانه:**\n\n"
         f"🔹 **پشتیبانی از تفکیک کانال‌ها:**\n"
         f"داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند و می‌توانید کانال جدید ایجاد یا انتخاب کنید.\n\n"
+        f"🔹 **بی‌تفاوتی مطلق به بزرگی و کوچکی حروف:**\n"
+        f"تمام اسامی بازیکنان بدون هیچ تداخلی با هم تطبیق و یکسان‌سازی می‌شوند.\n\n"
         f"🔹 **تشخیص قطعی برنده و سایدها:**\n"
         f"پشتیبانی از انواع فرمت‌های اعلام نتیجه چندخطی و کیاس.\n\n"
-        f"🔹 **پردازش پایدار بسته‌های بزرگ:**\n"
-        f"پردازش همزمان و ارسال گزارش دقیق برای تمام موارد دریافتی بدون وقفه.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -988,7 +1028,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         JOIN players p ON p.id = m.player_id
         WHERE LOWER(p.name) NOT IN ({placeholders}) 
           AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
-    ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
+    ''', [ep.lower() for ep in EXCLUDED_PLAYERS] + [ch_id, ch_id])
     global_stats = c.fetchone()
 
     m_global = global_stats[0] if (global_stats and global_stats[0] is not None) else 0.50
@@ -1010,7 +1050,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
           AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
         GROUP BY LOWER(p.name)
         HAVING total_games >= 18
-    ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
+    ''', [ep.lower() for ep in EXCLUDED_PLAYERS] + [ch_id, ch_id])
     rows = c.fetchall()
     conn.close()
 
@@ -1039,7 +1079,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bayes_score = base_bayes * vol_boost
 
         p_data = {
-            'name': name,
+            'name': name.lower(),
             'total_games': total_g,
             'total_wins': total_w,
             'raw_win': raw_win,
@@ -1057,7 +1097,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m_bayes = base_m * m_boost
             m_rate = (m_wins * 100 // m_games)
             mafia_candidates.append({
-                'name': name,
+                'name': name.lower(),
                 'bayes': m_bayes,
                 'rate': m_rate,
                 'games': m_games,
@@ -1070,7 +1110,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c_bayes = base_c * c_boost
             c_rate = (c_wins * 100 // c_games)
             citizen_candidates.append({
-                'name': name,
+                'name': name.lower(),
                 'bayes': c_bayes,
                 'rate': c_rate,
                 'games': c_games,
@@ -1139,7 +1179,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= نمایش کارت اختصاصی بازیکن =================
 async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name: str):
-    query = resolve_player_name(query_name)
+    query = resolve_player_name(query_name).lower()
 
     if query in EXCLUDED_PLAYERS:
         await update.message.reply_text(f"❌ بازیکنی با نام «{query}» در لیست سیاه آماری قرار دارد.", reply_markup=get_main_keyboard())
@@ -1154,7 +1194,7 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
         JOIN players p ON p.id = m.player_id
         WHERE LOWER(p.name) NOT IN ({placeholders}) 
           AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
-    ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
+    ''', [ep.lower() for ep in EXCLUDED_PLAYERS] + [ch_id, ch_id])
     global_avg_row = c.fetchone()
     m_global = global_avg_row[0] if (global_avg_row and global_avg_row[0] is not None) else 0.50
 
@@ -1173,7 +1213,7 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
         WHERE LOWER(p.name) NOT IN ({placeholders}) 
           AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
         GROUP BY LOWER(p.name)
-    ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
+    ''', [ep.lower() for ep in EXCLUDED_PLAYERS] + [ch_id, ch_id])
     all_players_raw = c.fetchall()
     conn.close()
 
@@ -1274,7 +1314,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با معماری بهینه، رفع خطای SSL و استخراج دقیق فعال شد...")
+    print("ربات بدون حساسیت به حروف بزرگ و کوچک و با یکپارچگی کامل اسامی فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
@@ -1338,6 +1378,8 @@ if __name__ == '__main__':
         app.run_polling(drop_pending_updates=False)
     except KeyboardInterrupt:
         print("\nربات با درخواست کاربر خاموش شد.")
+
+        
 custom_request = HTTPXRequest(
     proxy_url="socks5://127.0.0.1:10808",  # یا http://127.0.0.1:10809 بر اساس کلاینت شما
     connection_pool_size=100,
