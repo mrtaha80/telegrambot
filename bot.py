@@ -138,6 +138,7 @@ def make_bar(percent, length=8):
     return "▰" * filled + "▱" * (length - filled)
 
 def extract_roles_from_image(image_bytes):
+    """استخراج ابری پایدار نقش‌ها با حل مشکل SSL و قابلیت Retry"""
     roles_by_seat = {}
     lines = []
 
@@ -148,27 +149,39 @@ def extract_roles_from_image(image_bytes):
             'https': 'http://proxy.server:3128',
         }
 
-    try:
-        url = 'https://api.ocr.space/parse/image'
-        response = requests.post(
-            url,
-            files={'filename': ('image.jpg', image_bytes, 'image/jpeg')},
-            data={
-                'apikey': 'helloworld',
-                'language': 'per',
-                'isOverlayRequired': False,
-                'OCREngine': 2,
-                'scale': True
-            },
-            proxies=proxies,
-            timeout=12
-        )
-        result = response.json()
-        if not result.get('IsErroredOnProcessing') and result.get('ParsedResults'):
-            parsed_text = result['ParsedResults'][0].get('ParsedText', '')
-            lines = [normalize_text(l).strip() for l in parsed_text.splitlines() if l.strip()]
-    except Exception as e:
-        print(f"Cloud OCR error: {e}")
+    endpoints = [
+        'https://apipro1.ocr.space/parse/image',
+        'https://api.ocr.space/parse/image'
+    ]
+
+    for ep in endpoints:
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.post(
+                ep,
+                files={'filename': ('image.jpg', image_bytes, 'image/jpeg')},
+                data={
+                    'apikey': 'K88728398888957',
+                    'language': 'per',
+                    'isOverlayRequired': False,
+                    'OCREngine': 2,
+                    'scale': True
+                },
+                headers=headers,
+                proxies=proxies,
+                timeout=15
+            )
+            result = response.json()
+            if not result.get('IsErroredOnProcessing') and result.get('ParsedResults'):
+                parsed_text = result['ParsedResults'][0].get('ParsedText', '')
+                lines = [normalize_text(l).strip() for l in parsed_text.splitlines() if l.strip()]
+            if lines:
+                break
+        except Exception as e:
+            print(f"Cloud OCR error on {ep}: {e}")
+            continue
 
     if not lines and TESSERACT_AVAILABLE:
         try:
@@ -273,6 +286,7 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
+# ================= دیتابیس =================
 def init_db():
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
@@ -393,6 +407,7 @@ def get_or_create_player(cursor, raw_name):
     row = cursor.fetchone()
     return row[0], clean_name
 
+# ================= ثبت داده بازی =================
 def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1):
     try:
         norm = normalize_text(raw_text)
@@ -573,6 +588,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         print(f"Error parsing event: {e}")
         return False, f"خطای سیستمی: {str(e)}"
 
+# ================= ساخت فایل PDF =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="cafe mafia", filename="Mafia_Leaderboard.pdf"):
     doc = SimpleDocTemplate(filename, pagesize=letter, rightMargin=32, leftMargin=32, topMargin=32, bottomMargin=32)
     elements = []
@@ -678,6 +694,7 @@ def get_main_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+# ================= مدیریت دسته‌ای =================
 async def flush_batch_worker(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if chat_id in IS_PROCESSING:
         return
@@ -928,7 +945,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند و می‌توانید کانال جدید ایجاد یا انتخاب کنید.\n\n"
         f"🔹 **تشخیص قطعی برنده و سایدها:**\n"
         f"پشتیبانی از انواع فرمت‌های اعلام نتیجه چندخطی و کیاس.\n\n"
-        f"🔹 **پردازش بدون قفل بسته‌های بزرگ:**\n"
+        f"🔹 **پردازش پایدار بسته‌های بزرگ:**\n"
         f"پردازش همزمان و ارسال گزارش دقیق برای تمام موارد دریافتی بدون وقفه.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
@@ -944,7 +961,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-# ================= گزارش رسمی و لیدربرد (اصلاح باگ cw) =================
+# ================= گزارش رسمی و لیدربرد =================
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
@@ -1248,7 +1265,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با اصلاح خطای محاسبات لیدربرد فعال شد...")
+    print("ربات با معماری بهینه، رفع خطای SSL و استخراج دقیق فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
@@ -1312,7 +1329,6 @@ if __name__ == '__main__':
         app.run_polling(drop_pending_updates=False)
     except KeyboardInterrupt:
         print("\nربات با درخواست کاربر خاموش شد.")
-
 # اگر از پروکسی محلی (مثل v2rayNG یا Nekoray) استفاده می‌کنید:
 custom_request = HTTPXRequest(
     proxy_url="socks5://127.0.0.1:10808",  # یا http://127.0.0.1:10809 بر اساس کلاینت شما
