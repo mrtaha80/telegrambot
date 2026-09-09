@@ -7,6 +7,8 @@ import asyncio
 import logging
 import unicodedata
 import io
+import json
+import requests
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
@@ -18,17 +20,16 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 from fuzzywuzzy import fuzz
-
-# پردازش تصویر و OCR
 from PIL import Image, ImageEnhance, ImageFilter
+
 try:
     import pytesseract
     default_tess_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
     if os.path.exists(default_tess_path):
         pytesseract.pytesseract.tesseract_cmd = default_tess_path
-    OCR_AVAILABLE = True
+    TESSERACT_AVAILABLE = True
 except ImportError:
-    OCR_AVAILABLE = False
+    TESSERACT_AVAILABLE = False
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -50,8 +51,6 @@ LINK_PROFILE_STATE = 2
 ADD_CHANNEL_STATE = 3
 
 SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯"
-
-# فقط ali و sara نادیده گرفته می‌شوند
 EXCLUDED_PLAYERS = {'ali', 'sara'}
 
 PLAYER_ALIASES = {
@@ -105,7 +104,6 @@ def normalize_text(text):
         text = text.replace(ch, ' ')
     
     text = unicodedata.normalize('NFKD', text)
-    
     persian_nums = '۰۱۲۳۴۵۶۷۸۹'
     for i, p in enumerate(persian_nums):
         text = text.replace(p, str(i))
@@ -114,7 +112,6 @@ def normalize_text(text):
 def deep_clean_line(text):
     if not text:
         return ""
-    # حذف ایمن شماره‌ها و نمادهای اول خط بدون ایجاد خطای محدوده یونیکد
     pattern = rf'^[^\w\u0600-\u06FF]*([\d{SEAT_SYMBOLS}]+)[^\w\u0600-\u06FF]*'
     cleaned = re.sub(pattern, '', text).strip()
     return cleaned
@@ -124,36 +121,70 @@ def make_bar(percent, length=8):
     return "▰" * filled + "▱" * (length - filled)
 
 def extract_roles_from_image(image_bytes):
-    if not OCR_AVAILABLE:
-        return {}
+    """استخراج فوق‌العاده سبک و دقیق نقش‌ها با هوش مصنوعی ابری و بدون اشغال دیسک سرور"""
+    roles_by_seat = {}
+    lines = []
+
+    # روش اول: استفاده از موتور ابری OCR.Space Engine 2 ویژه زبان فارسی (سبک و بدون اشغال فضا)
     try:
-        image = Image.open(io.BytesIO(image_bytes)).convert('L')
-        enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(2.0).filter(ImageFilter.SHARPEN)
-
-        try:
-            text = pytesseract.image_to_string(image, lang='fas+eng')
-        except Exception:
-            text = pytesseract.image_to_string(image)
-
-        text = normalize_text(text)
-        roles_by_seat = {}
-
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            seat_match = re.search(r'(?:^|[^\d])([1-9]|10)[\s\.\:\-\/•]*(.+)$', line)
-            if seat_match:
-                seat_num = int(seat_match.group(1))
-                role_candidate = re.sub(r'[\(\)\[\]👈👉]', '', seat_match.group(2)).strip()
-                if len(role_candidate) >= 2:
-                    roles_by_seat[seat_num] = role_candidate
-
-        return roles_by_seat
+        url = 'https://api.ocr.space/parse/image'
+        response = requests.post(
+            url,
+            files={'filename': ('image.jpg', image_bytes, 'image/jpeg')},
+            data={
+                'apikey': 'helloworld',  # کلید رایگان عمومی سرویس OCR.Space
+                'language': 'per',
+                'isOverlayRequired': False,
+                'OCREngine': 2,
+                'scale': True
+            },
+            timeout=15
+        )
+        result = response.json()
+        if not result.get('IsErroredOnProcessing') and result.get('ParsedResults'):
+            parsed_text = result['ParsedResults'][0].get('ParsedText', '')
+            lines = [normalize_text(l).strip() for l in parsed_text.splitlines() if l.strip()]
     except Exception as e:
-        print(f"Error during OCR extraction: {e}")
-        return {}
+        print(f"Cloud OCR error (fallback to local): {e}")
+
+    # روش دوم (زاپاس در صورت قطعی اینترنت OCR ابری)
+    if not lines and TESSERACT_AVAILABLE:
+        try:
+            pil_image = Image.open(io.BytesIO(image_bytes)).convert('L')
+            enhancer = ImageEnhance.Contrast(pil_image)
+            enhanced = enhancer.enhance(2.5).filter(ImageFilter.SHARPEN)
+            try:
+                tess_text = pytesseract.image_to_string(enhanced, lang='fas+eng')
+            except Exception:
+                tess_text = pytesseract.image_to_string(enhanced)
+            lines = [normalize_text(l).strip() for l in tess_text.splitlines() if l.strip()]
+        except Exception as e:
+            print(f"Local Tesseract error: {e}")
+
+    for line in lines:
+        if not line:
+            continue
+
+        # تطبیق دوطرفه: خواندن شماره سیت چه در انتها باشد (فرمت Random.org) و چه در ابتدا
+        end_match = re.search(r'(.+?)[\s\.\:\-\/•]+([1-9]|10)$', line)
+        start_match = re.search(r'^(?:[^\d]*)([1-9]|10)[\s\.\:\-\/•]+(.+)$', line)
+
+        seat_num = None
+        role_cand = None
+
+        if end_match:
+            role_cand = end_match.group(1).strip()
+            seat_num = int(end_match.group(2))
+        elif start_match:
+            seat_num = int(start_match.group(1))
+            role_cand = start_match.group(2).strip()
+
+        if seat_num and role_cand:
+            role_cand = re.sub(r'[\(\)\[\]👈👉\.]', '', role_cand).strip()
+            if len(role_cand) >= 2:
+                roles_by_seat[seat_num] = role_cand
+
+    return roles_by_seat
 
 # ================= دیتابیس =================
 def init_db():
@@ -279,7 +310,7 @@ def detect_side(scenario, role):
 
     mafia_roles = [
         'don', 'دن', 'nato', 'ناتو', 'رئیس مافیا', 'رئیس', 'مافیای ساده', 
-        'mafia sade', 'mafia', 'مافیا'
+        'mafia sade', 'mafia', 'مافیا', 'دون'
     ]
 
     if any(s in sc for s in ['takavar', 'تکاور']):
@@ -341,12 +372,11 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         seat_counter = 1
         needs_image_ocr = False
 
-        # ساخت الگوی تطبیق ایمن برای پیدا کردن شماره یا نماد سیت
         seat_regex = rf'^[✦\s\/\•\:\.\-]*([0-9]+|[{SEAT_SYMBOLS}])'
 
         for line in players_block.strip().splitlines():
             line = line.strip()
-            if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯']):
+            if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯', '─━─━']):
                 continue
 
             seat_find = re.search(seat_regex, line)
@@ -796,8 +826,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"با زدن «🔗 اتصال نام بازی من»، نام خود را متصل کنید تا با زدن «👤 کارنامه من» آمار اختصاصی‌تان را ببینید.\n\n"
         f"🔹 **الگوریتم بیزی با ضریب ثبات سنگین:**\n"
         f"ثبات در تعداد بازی‌های بالا ارزش‌گذاری می‌شود.\n\n"
-        f"🔹 **موتور OCR تطبیق تصویر پویا:**\n"
-        f"استخراج هوشمند نقش‌های فارسی و متن و تطبیق از تصویر.\n\n"
+        f"🔹 **موتور OCR ابری قدرتمند:**\n"
+        f"استخراج نقش‌ها حتی از لیست‌های Random.org بدون اشغال فضای رم و دیسک سرور.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -1119,7 +1149,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با پارسر بدون خطا و ایمن برای کاراکترهای یونیکد فعال شد...")
+    print("ربات با OCR سبک ابری (بدون نیاز به PyTorch) فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
