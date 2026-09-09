@@ -114,7 +114,9 @@ def normalize_text(text):
 def deep_clean_line(text):
     if not text:
         return ""
-    cleaned = re.sub(r'^[^\w\u0600-\u06FF]*[\d\u2776-\u277F\u2780-\u2793\u2460-\u2473]+[^\w\u0600-\u06FF]*', '', text).strip()
+    # حذف ایمن شماره‌ها و نمادهای اول خط بدون ایجاد خطای محدوده یونیکد
+    pattern = rf'^[^\w\u0600-\u06FF]*([\d{SEAT_SYMBOLS}]+)[^\w\u0600-\u06FF]*'
+    cleaned = re.sub(pattern, '', text).strip()
     return cleaned
 
 def make_bar(percent, length=8):
@@ -339,12 +341,15 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         seat_counter = 1
         needs_image_ocr = False
 
+        # ساخت الگوی تطبیق ایمن برای پیدا کردن شماره یا نماد سیت
+        seat_regex = rf'^[✦\s\/\•\:\.\-]*([0-9]+|[{SEAT_SYMBOLS}])'
+
         for line in players_block.strip().splitlines():
             line = line.strip()
             if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯']):
                 continue
 
-            seat_find = re.search(r'^[✦\s\/\•\:\.\-]*([0-9]+|[➊-➓]|[❶-⓫])', line)
+            seat_find = re.search(seat_regex, line)
             current_seat = seat_counter
             if seat_find:
                 seat_raw = seat_find.group(1)
@@ -1114,7 +1119,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با سیستم گزارش تحلیلی کامل بسته فعال شد...")
+    print("ربات با پارسر بدون خطا و ایمن برای کاراکترهای یونیکد فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
