@@ -82,7 +82,6 @@ PLAYER_ALIASES = {
 }
 
 def resolve_player_name(raw_name):
-    # تبدیل به حروف کوچک و یکسان‌سازی بدون حساسیت به حروف
     name = raw_name.strip().lower()
     name = re.sub(rf'[{SEAT_SYMBOLS}]', '', name)
     name = re.sub(r'[\.\-_:⚜️👑💥☆•]', ' ', name)
@@ -299,7 +298,7 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= دیتابیس بدون حساسیت به حروف (NOCASE) =================
+# ================= دیتابیس =================
 def merge_player_accounts(cursor):
     merges = {
         'mmd4030': ['mamad', 'mammad', 'mohamad', 'mohammad', 'mmd', 'mmd 4030', 'mohammad 4030', 'mohamad 4030', 'mamad 4030', 'mammad 4030'],
@@ -546,7 +545,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             if not name or len(name) < 2 or not re.search(r'[a-zA-Z\u0600-\u06FF]', name):
                 continue
 
-            # تبدیل کامل به حروف کوچک برای برابری قطعی
             name_lower = resolve_player_name(name)
             if name_lower in EXCLUDED_PLAYERS:
                 seat_counter += 1
@@ -990,12 +988,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
-        f"🔹 **پشتیبانی از تفکیک کانال‌ها:**\n"
-        f"داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند و می‌توانید کانال جدید ایجاد یا انتخاب کنید.\n\n"
-        f"🔹 **بی‌تفاوتی مطلق به بزرگی و کوچکی حروف:**\n"
-        f"تمام اسامی بازیکنان بدون هیچ تداخلی با هم تطبیق و یکسان‌سازی می‌شوند.\n\n"
-        f"🔹 **تشخیص قطعی برنده و سایدها:**\n"
-        f"پشتیبانی از انواع فرمت‌های اعلام نتیجه چندخطی و کیاس.\n\n"
+        f"🔹 **هماهنگی کامل رتبه‌ها:** رتبه کارت شخصی دقیقاً برابر با رتبه شما در تالار افتخارات است.\n"
+        f"🔹 **پشتیبانی از تفکیک کانال‌ها:** داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند.\n"
+        f"🔹 **بی‌تفاوتی مطلق به بزرگی و کوچکی حروف:** تمام اسامی یکسان‌سازی شده‌اند.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -1177,7 +1172,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Error sending PDF: {e}")
 
-# ================= نمایش کارت اختصاصی بازیکن =================
+# ================= نمایش کارت اختصاصی بازیکن (منطبق بر رتبه جدول رسمی) =================
 async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name: str):
     query = resolve_player_name(query_name).lower()
 
@@ -1198,6 +1193,7 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
     global_avg_row = c.fetchone()
     m_global = global_avg_row[0] if (global_avg_row and global_avg_row[0] is not None) else 0.50
 
+    # دریافت تمام بازیکنان
     c.execute(f'''
         SELECT 
             p.id,
@@ -1224,14 +1220,17 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
     C_GLOBAL = 12.0
     VOLUME_POWER = 0.18
 
+    ranked_league_list = []
     all_players_calculated = []
+
     for row in all_players_raw:
         pid, name, tg, tw, mg, mw, cg, cw = row
         base_b = ((tw + (C_GLOBAL * m_global)) / (tg + C_GLOBAL)) * 100.0
         vol_boost = 1.0 + (VOLUME_POWER * math.log10((tg / 18.0) + 1.0)) if tg >= 18 else 1.0
         b_score = base_b * vol_boost
         r_win = (tw * 100.0 / tg) if tg > 0 else 0
-        all_players_calculated.append({
+
+        p_obj = {
             'id': pid,
             'name': name.lower(),
             'total_games': tg,
@@ -1242,30 +1241,43 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
             'm_wins': mw,
             'c_games': cg,
             'c_wins': cw
-        })
+        }
+        all_players_calculated.append(p_obj)
+        if tg >= 18:
+            ranked_league_list.append(p_obj)
 
-    all_players_calculated.sort(key=lambda x: (x['bayes_score'], x['total_games']), reverse=True)
+    # مرتب‌سازی رسمی لیگ
+    ranked_league_list.sort(key=lambda x: (x['bayes_score'], x['total_games']), reverse=True)
 
     matched_player = None
-    rank = 0
     best_score = 0
 
-    for idx, p in enumerate(all_players_calculated, 1):
+    for p in all_players_calculated:
         score = fuzz.ratio(query, p['name'])
         if query == p['name']:
             matched_player = p
-            rank = idx
             break
         elif score > best_score and score >= 75:
             best_score = score
             matched_player = p
-            rank = idx
 
     if not matched_player:
         await update.message.reply_text(f"❌ بازیکنی با نام «{query}» در کانال **{ch_name}** پیدا نشد.", parse_mode="Markdown", reply_markup=get_main_keyboard())
         return
 
     p = matched_player
+    
+    # تعیین رتبه بر اساس جدول رسمی لیگ (واجدین بالای ۱۸ بازی)
+    official_rank_text = "—"
+    if p['total_games'] >= 18:
+        for idx, lp in enumerate(ranked_league_list, 1):
+            if lp['name'] == p['name']:
+                official_rank_text = f"#{idx} در تالار افتخارات (از میان {len(ranked_league_list)} بازیکن رسمی)"
+                break
+    else:
+        rem = 18 - p['total_games']
+        official_rank_text = f"غیررسمی ({rem} بازی تا ورود به تالار افتخارات)"
+
     m_rate = (p['m_wins'] * 100 // p['m_games']) if p['m_games'] > 0 else 0
     c_rate = (p['c_wins'] * 100 // p['c_games']) if p['c_games'] > 0 else 0
     bar_m = make_bar(m_rate, length=6)
@@ -1276,8 +1288,8 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
         f"📍 کانال: **{ch_name}**\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 **نام:** `{p['name'].title()}`\n"
-        f"👑 **جایگاه در این کانال:** `#{rank}` (از میان {len(all_players_calculated)} بازیکن)\n"
-        f"⭐️ **امتیاز نهایی:** `{p['bayes_score']:.2f}`\n"
+        f"👑 **جایگاه رسمی لیگ:** `{official_rank_text}`\n"
+        f"⭐️ **امتیاز عملکرد:** `{p['bayes_score']:.2f}`\n"
         f"⚔️ **تعداد کل نبردها:** `{p['total_games']}` بازی\n"
         f"🏆 **وین‌ریت قطعی:** `{p['raw_win']:.1f}%` ({p['total_wins']} برد)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1314,7 +1326,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات بدون حساسیت به حروف بزرگ و کوچک و با یکپارچگی کامل اسامی فعال شد...")
+    print("ربات با هماهنگی کامل رتبه کارت و تالار افتخارات فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
@@ -1378,13 +1390,3 @@ if __name__ == '__main__':
         app.run_polling(drop_pending_updates=False)
     except KeyboardInterrupt:
         print("\nربات با درخواست کاربر خاموش شد.")
-
-        
-custom_request = HTTPXRequest(
-    proxy_url="socks5://127.0.0.1:10808",  # یا http://127.0.0.1:10809 بر اساس کلاینت شما
-    connection_pool_size=100,
-    pool_timeout=60.0,
-    read_timeout=60.0,
-    write_timeout=60.0,
-    connect_timeout=60.0,
-)
