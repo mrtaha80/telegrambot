@@ -138,7 +138,7 @@ def make_bar(percent, length=8):
     return "▰" * filled + "▱" * (length - filled)
 
 def extract_roles_from_image(image_bytes):
-    """استخراج ابری پایدار نقش‌ها با حل مشکل SSL و قابلیت Retry"""
+    """استخراج ابری پایدار نقش‌ها با بهینه‌سازی سایز عکس و مهلت ارتباط ۳۰ ثانیه"""
     roles_by_seat = {}
     lines = []
 
@@ -149,29 +149,37 @@ def extract_roles_from_image(image_bytes):
             'https': 'http://proxy.server:3128',
         }
 
+    # بهینه‌سازی و کم کردن حجم عکس برای آپلود فوری
+    optimized_bytes = image_bytes
+    try:
+        pil_img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        if pil_img.width > 1200 or pil_img.height > 1200:
+            pil_img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+        out_io = io.BytesIO()
+        pil_img.save(out_io, format='JPEG', quality=85)
+        optimized_bytes = out_io.getvalue()
+    except Exception as e:
+        print(f"Image optimization notice: {e}")
+
     endpoints = [
-        'https://apipro1.ocr.space/parse/image',
-        'https://api.ocr.space/parse/image'
+        ('https://api.ocr.space/parse/image', 'helloworld'),
+        ('https://apipro1.ocr.space/parse/image', 'K88728398888957')
     ]
 
-    for ep in endpoints:
+    for url, key in endpoints:
         try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
             response = requests.post(
-                ep,
-                files={'filename': ('image.jpg', image_bytes, 'image/jpeg')},
+                url,
+                files={'filename': ('image.jpg', optimized_bytes, 'image/jpeg')},
                 data={
-                    'apikey': 'K88728398888957',
+                    'apikey': key,
                     'language': 'per',
                     'isOverlayRequired': False,
                     'OCREngine': 2,
                     'scale': True
                 },
-                headers=headers,
                 proxies=proxies,
-                timeout=15
+                timeout=30
             )
             result = response.json()
             if not result.get('IsErroredOnProcessing') and result.get('ParsedResults'):
@@ -180,7 +188,7 @@ def extract_roles_from_image(image_bytes):
             if lines:
                 break
         except Exception as e:
-            print(f"Cloud OCR error on {ep}: {e}")
+            print(f"Cloud OCR attempt on {url} failed: {e}")
             continue
 
     if not lines and TESSERACT_AVAILABLE:
@@ -419,6 +427,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         event_id = clean_event_id(raw_event)
         raw_scenario = scenario_match.group(1).strip() if scenario_match else ""
 
+        # استخراج هوشمند و چندخطی برنده بازی
         win_block_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_ ]*([\s\S]*?)(?:mvp|☆|★|✦|━|─|$)', norm, re.IGNORECASE)
         if not win_block_match:
             return False, f"ایونت `{event_id}`: سطر برنده بازی پیدا نشد"
@@ -1329,7 +1338,6 @@ if __name__ == '__main__':
         app.run_polling(drop_pending_updates=False)
     except KeyboardInterrupt:
         print("\nربات با درخواست کاربر خاموش شد.")
-# اگر از پروکسی محلی (مثل v2rayNG یا Nekoray) استفاده می‌کنید:
 custom_request = HTTPXRequest(
     proxy_url="socks5://127.0.0.1:10808",  # یا http://127.0.0.1:10809 بر اساس کلاینت شما
     connection_pool_size=100,
