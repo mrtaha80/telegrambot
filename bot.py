@@ -45,7 +45,6 @@ BATCH_TASKS = {}
 TOTAL_PROCESSED_COUNT = 0
 DB_LOCK = asyncio.Lock()
 
-# مراحل مکالمه
 SEARCH_STATE = 1
 LINK_PROFILE_STATE = 2
 ADD_CHANNEL_STATE = 3
@@ -103,7 +102,19 @@ def normalize_text(text):
     for ch in invisible_chars:
         text = text.replace(ch, ' ')
     
+    # تبدیل فونت‌های فانتزی و ریاضی به حروف استاندارد
     text = unicodedata.normalize('NFKD', text)
+    
+    # تبدیل کاراکترهای Small Capitals مثل ᴡɪɴ و sᴄᴇɴᴀʀɪᴏ
+    small_caps = {
+        'ᴀ': 'a', 'ʙ': 'b', 'ᴄ': 'c', 'ᴅ': 'd', 'ᴇ': 'e', 'ғ': 'f', 'ɢ': 'g', 'ʜ': 'h',
+        'ɪ': 'i', 'ᴊ': 'j', 'ᴋ': 'k', 'ʟ': 'l', 'ᴍ': 'm', 'ɴ': 'n', 'ᴏ': 'o', 'ᴘ': 'p',
+        'ǫ': 'q', 'ʀ': 'r', 's': 's', 'ᴛ': 't', 'ᴜ': 'u', 'ᴠ': 'v', 'ᴡ': 'w', 'x': 'x',
+        'ʏ': 'y', 'ᴢ': 'z'
+    }
+    for sc, norm_c in small_caps.items():
+        text = text.replace(sc, norm_c)
+
     persian_nums = '۰۱۲۳۴۵۶۷۸۹'
     for i, p in enumerate(persian_nums):
         text = text.replace(p, str(i))
@@ -121,9 +132,17 @@ def make_bar(percent, length=8):
     return "▰" * filled + "▱" * (length - filled)
 
 def extract_roles_from_image(image_bytes):
-    """استخراج ابری نقش‌ها حتی در فرمت‌های معکوس سایت Random.org"""
+    """استخراج هوشمند نقش‌ها با پراکسی PythonAnywhere و سازگار با Random.org"""
     roles_by_seat = {}
     lines = []
+
+    # پیکربندی پروکسی رایگان PythonAnywhere
+    proxies = None
+    if 'PYTHONANYWHERE_DOMAIN' in os.environ:
+        proxies = {
+            'http': 'http://proxy.server:3128',
+            'https': 'http://proxy.server:3128',
+        }
 
     try:
         url = 'https://api.ocr.space/parse/image'
@@ -137,14 +156,15 @@ def extract_roles_from_image(image_bytes):
                 'OCREngine': 2,
                 'scale': True
             },
-            timeout=15
+            proxies=proxies,
+            timeout=20
         )
         result = response.json()
         if not result.get('IsErroredOnProcessing') and result.get('ParsedResults'):
             parsed_text = result['ParsedResults'][0].get('ParsedText', '')
             lines = [normalize_text(l).strip() for l in parsed_text.splitlines() if l.strip()]
     except Exception as e:
-        print(f"Cloud OCR error: {e}")
+        print(f"Cloud OCR attempt error: {e}")
 
     if not lines and TESSERACT_AVAILABLE:
         try:
@@ -184,8 +204,9 @@ def extract_roles_from_image(image_bytes):
     return roles_by_seat
 
 def infer_scenario(extracted_roles, current_scenario=""):
-    """سیستم هوشمند تشخیص سناریو از روی نقش‌های ساید مافیا و مستقل"""
-    if current_scenario and len(current_scenario) > 2:
+    """تشخیص کاملاً خودکار سناریو از روی چیدمان نقش‌ها"""
+    sc_clean = current_scenario.strip().lower()
+    if sc_clean and len(sc_clean) > 2 and 'کلاسیک' not in sc_clean and 'classic' not in sc_clean:
         return current_scenario
 
     all_roles_text = " ".join(extracted_roles).lower()
@@ -207,7 +228,7 @@ def infer_scenario(extracted_roles, current_scenario=""):
     elif any(r in all_roles_text for r in ['تروریست', 'terrorist', 'دون', 'دن', 'مافیای ساده']):
         return "کلاسیک"
     
-    return "کلاسیک"
+    return current_scenario if current_scenario else "کلاسیک"
 
 def detect_side(scenario, role):
     sc = scenario.lower().strip()
@@ -222,7 +243,6 @@ def detect_side(scenario, role):
         'mafia sade', 'mafia', 'مافیا'
     ]
 
-    # سناریوی کلاسیک (Classic)
     if any(s in sc for s in ['classic', 'کلاسیک']):
         mafia_roles.extend(['terrorist', 'تروریست', 'دون', 'دن', 'مافیای ساده'])
     elif any(s in sc for s in ['takavar', 'تکاور']):
@@ -374,7 +394,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         win_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_ ]*([^\n\r]+)', norm, re.IGNORECASE)
 
         if not win_match:
-            return False, "عدم یافتن نتیجه برنده بازی در پیام"
+            return False, "عدم یافتن سطر نتیجه (WIN/برنده) در متن"
 
         event_id = event_match.group(1).strip() if event_match else str(fallback_id)
         raw_scenario = scenario_match.group(1).strip() if scenario_match else ""
@@ -387,11 +407,11 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             winning_side = "Citizen"
 
         if not winning_side:
-            return False, "ساید برنده (مافیا یا شهروند) مشخص نیست"
+            return False, f"ساید برنده از متن '{win_text}' تشخیص داده نشد"
 
         players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|❖|☆|$)', norm, re.IGNORECASE)
         if not players_match:
-            return False, "لیست بازیکنان پیدا نشد"
+            return False, "لیست بازیکنان یافت نشد"
 
         players_block = players_match.group(1)
         temp_players = []
@@ -402,7 +422,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
 
         for line in players_block.strip().splitlines():
             line = line.strip()
-            if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯', '─━─━', '❖']):
+            if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯', '─━─━', '❖', '🌕']):
                 continue
 
             seat_find = re.search(seat_regex, line)
@@ -473,7 +493,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             p['role'] = final_role
             extracted_role_list.append(final_role)
 
-        # استنتاج هوشمند سناریو بر مبنای نقش‌های موجود
         scenario = infer_scenario(extracted_role_list, raw_scenario)
 
         parsed_players = []
@@ -483,7 +502,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                 parsed_players.append((p['name'], p['role'].lower(), side))
 
         if len(parsed_players) < 5:
-            return False, "تعداد بازیکنان معتبر غیرمستقل کمتر از ۵ نفر بود"
+            return False, "تعداد بازیکنان معتبر کمتر از ۵ نفر بود"
 
         game_signature = f"ev_{event_id}_sc_{scenario.lower()[:5]}"
 
@@ -826,7 +845,7 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
     norm_content = normalize_text(raw_content).lower()
 
     if (any(k in norm_content for k in ['player', 'بازیکن', 'سیت', 'ساده', 'مافیا']) and 
-        any(w in norm_content for w in ['win', 'برد', 'شهروند', 'مافیا'])) or image_bytes:
+        any(w in norm_content for w in ['win', 'برد', 'شهروند', 'مافیا', 'کیاس'])) or image_bytes:
 
         chat_id = msg.chat_id
         if chat_id not in BATCH_STORAGE:
@@ -856,9 +875,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔹 **پشتیبانی از تفکیک کانال‌ها:**\n"
         f"داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند و می‌توانید کانال جدید ایجاد یا انتخاب کنید.\n\n"
         f"🔹 **تشخیص هوشمند سناریو و پشتیبانی از Classic:**\n"
-        f"سناریوها به طور خودکار بر اساس ترکیب نقش‌های مافیا و مستقل (از جمله کلاسیک با نقش‌های دون و تروریست) استنتاج می‌شوند.\n\n"
+        f"سناریوها به طور خودکار بر اساس ترکیب نقش‌های مافیا و مستقل استنتاج می‌شوند.\n\n"
         f"🔹 **موتور OCR ابری قدرتمند:**\n"
-        f"استخراج نقش‌ها حتی از لیست‌های معکوس Random.org بدون اشغال فضای سرور.\n\n"
+        f"استخراج نقش‌ها حتی از لیست‌های Random.org بدون اشغال فضای سرور.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -951,7 +970,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'm_games': m_games,
             'm_wins': m_wins,
             'c_games': c_games,
-            'c_wins': c_wins
+            'c_wins': cw
         }
         processed_list.append(p_data)
 
@@ -1179,7 +1198,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با موتور استنتاج خودکار سناریو (از جمله کلاسیک) فعال شد...")
+    print("ربات با سیستم استنتاج خودکار سناریو و پشتیبانی از Classic فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
