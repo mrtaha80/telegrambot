@@ -49,7 +49,6 @@ LINK_PROFILE_STATE = 2
 ADD_CHANNEL_STATE = 3
 
 SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯"
-# اضافه شدن ana و zahra به لیست اسامی پنهان‌آماری
 HIDDEN_PLAYERS = {'ali', 'sara', 'god', 'گاد', 'hasan', 'azar', 'saeid a', 'amir', 'ana', 'zahra'}
 
 PLAYER_ALIASES = {
@@ -101,7 +100,6 @@ def resolve_player_name(raw_name):
     if not name:
         return ""
 
-    # تفکیک صریح و مجزا برای جلوگیری از ادغام ana و hana
     if name in ['ana', 'anna']:
         return 'ana'
     if name in ['hana', 'hanna']:
@@ -436,9 +434,18 @@ def init_db():
             game_signature TEXT,
             channel_id INTEGER,
             event_id TEXT,
+            raw_text TEXT,
             PRIMARY KEY(game_signature, channel_id)
         )
     ''')
+
+    c.execute("PRAGMA table_info(processed_games)")
+    cols = [r[1] for r in c.fetchall()]
+    if 'raw_text' not in cols:
+        try:
+            c.execute("ALTER TABLE processed_games ADD COLUMN raw_text TEXT")
+        except Exception:
+            pass
 
     merge_player_accounts(c)
 
@@ -612,9 +619,9 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             ''', (player_id, channel_id, game_signature, event_id, scenario, side, is_win))
 
         c.execute('''
-            INSERT OR REPLACE INTO processed_games (game_signature, channel_id, event_id)
-            VALUES (?, ?, ?)
-        ''', (game_signature, channel_id, event_id))
+            INSERT OR REPLACE INTO processed_games (game_signature, channel_id, event_id, raw_text)
+            VALUES (?, ?, ?, ?)
+        ''', (game_signature, channel_id, event_id, raw_text))
 
         conn.commit()
         conn.close()
@@ -993,9 +1000,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
+        f"🔹 **نمایش ۳ بازیکن برتر دارای بیشترین کیک:** محاسبه و نمایش خودکار بیشترین تعداد کلمه/ایموجی کیک در گزارش‌ها.\n"
         f"🔹 **تفکیک صریح Ana و Hana:** استقلال کامل آمار دو بازیکن.\n"
-        f"🔹 **مخفی‌سازی هوشمند Amir و سایر موارد:** عدم نمایش داده‌های آماری اسامی خاص بدون حذف فیزیکی.\n"
-        f"🔹 **۱۰ بازیکن برتر هر ساید:** رتبه‌بندی تخصصی ۱۰ نفر برتر مافیا و شهروند در لیدربرد و PDF.\n\n"
+        f"🔹 **مخفی‌سازی هوشمند Amir، Zahra و Ana:** عدم نمایش داده‌های آماری اسامی خاص بدون حذف فیزیکی.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -1011,15 +1018,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "▫️ **حد نصاب تخصصی ساید:** انجام حداقل **۹ بازی** در هر ساید (مافیا یا شهروند) جهت قرارگیری در جدول برترین‌های آن ساید.\n\n"
         
         "⚖️ **۲. الگوریتم تنظیم حجم و امتیازدهی بیزی (Bayesian Rating):**\n"
-        "برای جلوگیری از تاثیر شانس و تعداد کم بازی‌ها (مثل ۱۰۰٪ وین‌ریت با ۲ بازی)، از مدل پیشرفته آمار بیزی استفاده می‌شود:\n"
+        "برای جلوگیری از تاثیر شانس و تعداد کم بازی‌ها ( مثل ۱۰۰٪ وین‌ریت با ۲ بازی)، از مدل پیشرفته آمار بیزی استفاده می‌شود:\n"
         "▫️ **میانگین مادری (Prior / Global Mean):** نقطه تعادل بر اساس میانگین کل بردهای لیگ.\n"
         "▫️ **وزن‌دهی به حجم بازی:** هرچه تعداد بازی‌ها بیشتر شود، امتیاز واقعی بازیکن تثبیت و تقویت می‌شود.\n\n"
 
         "🛡 **۳. تفکیک تخصصی سایدها:**\n"
         "مهارت بازیکن در کنترل شب (مافیا) و استدلال روز (شهروند) به صورت کاملاً مجزا در دو جدول تفکیک و ارزیابی می‌شوند.\n\n"
 
-        "🔍 **۴. تفکیک حساب‌های مشابه (Ana و Hana):**\n"
-        "سیستم به صورت کاملاً مستقل اسامی Ana و Hana را پردازش می‌کند تا تداخلی در آمارشان ایجاد نشود.\n\n"
+        "🍰 **۴. بخش برترین‌های کیک:**\n"
+        "در انتهای تالار افتخارات، ۳ نفری که بیشترین کلمه یا ایموجی «کیک» در کنار نامشان ثبت شده است به نمایش درمی‌آید.\n\n"
 
         "📄 **۵. تالار افتخارات PDF:**\n"
         "با کلیک روی دکمه گزارش، فایل PDF شکیل و استاندارد (بدون کاراکترهای مربعی شکل) شامل رتبه‌بندی کلی و ۱۰ بازیکن برتر هر ساید برای شما صادر می‌شود."
@@ -1069,7 +1076,38 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             HAVING total_games >= 18
         ''', [hp.lower() for hp in HIDDEN_PLAYERS] + [ch_id, ch_id])
         rows = c.fetchall()
+
+        # استخراج متن‌های ذخیره‌شده بازی‌ها برای شمارش کلمه «کیک» یا ایموجی آن
+        c.execute("SELECT raw_text FROM processed_games WHERE channel_id = ? OR channel_id IS NULL", (ch_id,))
+        game_texts = c.fetchall()
         conn.close()
+
+        # شمارش تعداد «کیک» برای هر بازیکن از روی متن ایونت‌ها و اسامی
+        cake_counts = {}
+        for row in rows:
+            name = row[0]
+            cake_counts[name] = 0
+
+        for text_tuple in game_texts:
+            t = text_tuple[0]
+            if not t:
+                continue
+            t_lower = t.lower()
+            # شمارش تعداد تکرار کلمه کیک یا ایموجی آن در متن بازی‌ها به همراه نام بازیکنان
+            for name in cake_counts.keys():
+                if name in t_lower:
+                    # بررسی اینکه در آن خط یا اطراف اسم کلمه کیک یا 🍰 وجود دارد یا خیر
+                    pattern = rf'{name}[^\n]*?(کیک|🍰)|(کیک|🍰)[^\n]*?{name}'
+                    matches = re.findall(pattern, t_lower)
+                    if matches:
+                        cake_counts[name] += len(matches)
+                    elif 'کیک' in t_lower or '🍰' in t_lower:
+                        # اگر کلی‌تر در متن بازی تکرار شده باشد
+                        pass
+
+        # مرتب‌سازی بازیکنان بر اساس بیشترین تعداد کیک
+        sorted_cake_players = sorted(cake_counts.items(), key=lambda x: x[1], reverse=True)
+        top_cakes = [item for item in sorted_cake_players if item[1] > 0][:3]
 
         if not rows:
             await update.message.reply_text(
@@ -1178,6 +1216,15 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 report += f"{shields[r-1]} {r}. **{c_item['name'].title()}** ⟵ نمره: `{c_item['bayes']:.2f}` (برد: `{c_item['rate']}%` در `{c_item['games']}` بازی)\n"
         else:
             report += "بازیکنی با حداقل ۹ بازی شهروندی یافت نشد.\n"
+
+        # اضافه کردن بخش ۳ نفر اول دارای بیشترین کیک
+        report += "\n🍰 **۳ بازیکن برتر دارای بیشترین کیک:**\n"
+        if top_cakes:
+            cake_medals = ["🥇", "🥈", "🥉"]
+            for idx, (c_name, c_count) in enumerate(top_cakes):
+                report += f"{cake_medals[idx]} **{c_name.title()}** ⟵ تعداد: `{c_count}` کیک\n"
+        else:
+            report += "موردی با کلمه کیک ثبت نشده است.\n"
 
         await send_large_text(update, report, context)
 
@@ -1349,7 +1396,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با تفکیک دقیق Ana و Hana و پنهان‌سازی Zahra و Amir فعال شد...")
+    print("ربات همراه با بخش نمایش ۳ بازیکن برتر کیک‌خورده فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
