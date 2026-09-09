@@ -121,18 +121,17 @@ def make_bar(percent, length=8):
     return "▰" * filled + "▱" * (length - filled)
 
 def extract_roles_from_image(image_bytes):
-    """استخراج فوق‌العاده سبک و دقیق نقش‌ها با هوش مصنوعی ابری و بدون اشغال دیسک سرور"""
+    """استخراج ابری نقش‌ها حتی در فرمت‌های معکوس سایت Random.org"""
     roles_by_seat = {}
     lines = []
 
-    # روش اول: استفاده از موتور ابری OCR.Space Engine 2 ویژه زبان فارسی (سبک و بدون اشغال فضا)
     try:
         url = 'https://api.ocr.space/parse/image'
         response = requests.post(
             url,
             files={'filename': ('image.jpg', image_bytes, 'image/jpeg')},
             data={
-                'apikey': 'helloworld',  # کلید رایگان عمومی سرویس OCR.Space
+                'apikey': 'helloworld',
                 'language': 'per',
                 'isOverlayRequired': False,
                 'OCREngine': 2,
@@ -145,9 +144,8 @@ def extract_roles_from_image(image_bytes):
             parsed_text = result['ParsedResults'][0].get('ParsedText', '')
             lines = [normalize_text(l).strip() for l in parsed_text.splitlines() if l.strip()]
     except Exception as e:
-        print(f"Cloud OCR error (fallback to local): {e}")
+        print(f"Cloud OCR error: {e}")
 
-    # روش دوم (زاپاس در صورت قطعی اینترنت OCR ابری)
     if not lines and TESSERACT_AVAILABLE:
         try:
             pil_image = Image.open(io.BytesIO(image_bytes)).convert('L')
@@ -165,7 +163,6 @@ def extract_roles_from_image(image_bytes):
         if not line:
             continue
 
-        # تطبیق دوطرفه: خواندن شماره سیت چه در انتها باشد (فرمت Random.org) و چه در ابتدا
         end_match = re.search(r'(.+?)[\s\.\:\-\/•]+([1-9]|10)$', line)
         start_match = re.search(r'^(?:[^\d]*)([1-9]|10)[\s\.\:\-\/•]+(.+)$', line)
 
@@ -185,6 +182,73 @@ def extract_roles_from_image(image_bytes):
                 roles_by_seat[seat_num] = role_cand
 
     return roles_by_seat
+
+def infer_scenario(extracted_roles, current_scenario=""):
+    """سیستم هوشمند تشخیص سناریو از روی نقش‌های ساید مافیا و مستقل"""
+    if current_scenario and len(current_scenario) > 2:
+        return current_scenario
+
+    all_roles_text = " ".join(extracted_roles).lower()
+
+    if any(r in all_roles_text for r in ['shayad', 'شیاد', 'بازپرس']):
+        return "بازپرس"
+    elif any(r in all_roles_text for r in ['yaghi', 'یاغی', 'hacker', 'هکر', 'نماینده']):
+        return "نماینده"
+    elif any(r in all_roles_text for r in ['matador', 'ماتادور', 'گودمن', 'پدرخوانده', 'نوسترا', 'nostra', 'شرلوک']):
+        return "پدرخوانده"
+    elif any(r in all_roles_text for r in ['grogangir', 'گروگانگیر', 'تکاور']):
+        return "تکاور"
+    elif any(r in all_roles_text for r in ['mozakere', 'مذاکره', 'خریدار']):
+        return "مذاکره"
+    elif any(r in all_roles_text for r in ['jadogar', 'جادوگر', 'jalad', 'جلاد', 'کاپو']):
+        return "کاپو"
+    elif any(r in all_roles_text for r in ['saye', 'سایه', 'هانیبال']):
+        return "هانیبال"
+    elif any(r in all_roles_text for r in ['تروریست', 'terrorist', 'دون', 'دن', 'مافیای ساده']):
+        return "کلاسیک"
+    
+    return "کلاسیک"
+
+def detect_side(scenario, role):
+    sc = scenario.lower().strip()
+    ro = role.lower().strip()
+
+    independents = ['jack', 'جک', 'nostra', 'نوسترا', 'sherlock', 'شرلوک', 'churchill', 'چرچیل']
+    if any(ind in ro for ind in independents):
+        return "Independent"
+
+    mafia_roles = [
+        'don', 'دن', 'دون', 'nato', 'ناتو', 'رئیس مافیا', 'رئیس', 'مافیای ساده', 
+        'mafia sade', 'mafia', 'مافیا'
+    ]
+
+    # سناریوی کلاسیک (Classic)
+    if any(s in sc for s in ['classic', 'کلاسیک']):
+        mafia_roles.extend(['terrorist', 'تروریست', 'دون', 'دن', 'مافیای ساده'])
+    elif any(s in sc for s in ['takavar', 'تکاور']):
+        mafia_roles.extend(['grogangir', 'گروگانگیر', 'گروگان گیر'])
+    elif any(s in sc for s in ['bazpors', 'بازپرس']):
+        mafia_roles.extend(['shayad', 'شیاد'])
+    elif any(s in sc for s in ['mozakere', 'مذاکره']):
+        mafia_roles.extend(['mozakere', 'مذاکره کننده', 'خریدار'])
+    elif any(s in sc for s in ['kapo', 'capo', 'کاپو']):
+        mafia_roles.extend(['jadogar', 'جادوگر', 'jalad', 'جلاد'])
+    elif any(s in sc for s in ['hanibal', 'hannibal', 'هانیبال']):
+        mafia_roles.extend(['hanibal', 'hannibal', 'هانیبال', 'saye', 'سایه'])
+    elif any(s in sc for s in ['namayande', 'namayandeh', 'نماینده']):
+        mafia_roles.extend(['yaghi', 'یاغی', 'hacker', 'هکر'])
+    elif any(s in sc for s in ['pishrafte', 'پیشرفته']):
+        mafia_roles.extend(['vakil', 'وکیل', 'terrorist', 'تروریست', 'natasha', 'ناتاشا'])
+    elif any(s in sc for s in ['elclassico', 'الکلاسیکو']):
+        mafia_roles.extend(['khoan', 'خوان', 'blanco', 'بلانکو', 'pablo', 'scobar', 'پابلو'])
+    elif any(s in sc for s in ['god father', 'pedarkhande', 'پدرخوانده', 'نوسترا', 'nostra', 'jack', 'جک', 'شرلوک']):
+        mafia_roles.extend(['pedarkhande', 'پدرخوانده', 'پدر خوانده', 'matador', 'ماتادور', 'saul', 'گودمن', 'سال گودمن'])
+
+    for m in mafia_roles:
+        if m in ro:
+            return "Mafia"
+
+    return "Citizen"
 
 # ================= دیتابیس =================
 def init_db():
@@ -300,44 +364,6 @@ def get_or_create_player(cursor, raw_name):
     row = cursor.fetchone()
     return row[0], clean_name
 
-def detect_side(scenario, role):
-    sc = scenario.lower().strip()
-    ro = role.lower().strip()
-
-    independents = ['jack', 'جک', 'nostra', 'نوسترا', 'sherlock', 'شرلوک', 'churchill', 'چرچیل']
-    if any(ind in ro for ind in independents):
-        return "Independent"
-
-    mafia_roles = [
-        'don', 'دن', 'nato', 'ناتو', 'رئیس مافیا', 'رئیس', 'مافیای ساده', 
-        'mafia sade', 'mafia', 'مافیا', 'دون'
-    ]
-
-    if any(s in sc for s in ['takavar', 'تکاور']):
-        mafia_roles.extend(['grogangir', 'گروگانگیر', 'گروگان گیر'])
-    elif any(s in sc for s in ['bazpors', 'بازپرس']):
-        mafia_roles.extend(['shayad', 'شیاد'])
-    elif any(s in sc for s in ['mozakere', 'مذاکره']):
-        mafia_roles.extend(['mozakere', 'مذاکره کننده', 'خریدار'])
-    elif any(s in sc for s in ['kapo', 'capo', 'کاپو']):
-        mafia_roles.extend(['jadogar', 'جادوگر', 'jalad', 'جلاد'])
-    elif any(s in sc for s in ['hanibal', 'hannibal', 'هانیبال']):
-        mafia_roles.extend(['hanibal', 'hannibal', 'هانیبال', 'saye', 'سایه'])
-    elif any(s in sc for s in ['namayande', 'namayandeh', 'نماینده']):
-        mafia_roles.extend(['yaghi', 'یاغی', 'hacker', 'هکر'])
-    elif any(s in sc for s in ['pishrafte', 'پیشرفته']):
-        mafia_roles.extend(['vakil', 'وکیل', 'terrorist', 'تروریست', 'natasha', 'ناتاشا'])
-    elif any(s in sc for s in ['elclassico', 'الکلاسیکو']):
-        mafia_roles.extend(['khoan', 'خوان', 'blanco', 'بلانکو', 'pablo', 'scobar', 'پابلو'])
-    elif any(s in sc for s in ['god father', 'pedarkhande', 'پدرخوانده', 'نوسترا', 'nostra', 'jack', 'جک', 'شرلوک']):
-        mafia_roles.extend(['pedarkhande', 'پدرخوانده', 'پدر خوانده', 'matador', 'ماتادور', 'saul', 'گودمن', 'سال گودمن'])
-
-    for m in mafia_roles:
-        if m in ro:
-            return "Mafia"
-
-    return "Citizen"
-
 # ================= ثبت داده بازی =================
 def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1):
     try:
@@ -347,23 +373,23 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         scenario_match = re.search(r'(?:scenario|سناریو)\s*[:•\-_ ]*([^\n\r]+)', norm, re.IGNORECASE)
         win_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_ ]*([^\n\r]+)', norm, re.IGNORECASE)
 
-        if not scenario_match or not win_match:
-            return False, "عدم یافتن سناریو یا برنده در پیام"
+        if not win_match:
+            return False, "عدم یافتن نتیجه برنده بازی در پیام"
 
         event_id = event_match.group(1).strip() if event_match else str(fallback_id)
-        scenario = scenario_match.group(1).strip()
+        raw_scenario = scenario_match.group(1).strip() if scenario_match else ""
         win_text = win_match.group(1).strip().lower()
 
         winning_side = None
         if any(w in win_text for w in ['مافیا', 'mafia']):
             winning_side = "Mafia"
-        elif any(w in win_text for w in ['شهر', 'citizen', 'کی اس', 'ks']):
+        elif any(w in win_text for w in ['شهر', 'citizen', 'کی اس', 'ks', 'کیاس']):
             winning_side = "Citizen"
 
         if not winning_side:
             return False, "ساید برنده (مافیا یا شهروند) مشخص نیست"
 
-        players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|$)', norm, re.IGNORECASE)
+        players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|❖|☆|$)', norm, re.IGNORECASE)
         if not players_match:
             return False, "لیست بازیکنان پیدا نشد"
 
@@ -376,7 +402,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
 
         for line in players_block.strip().splitlines():
             line = line.strip()
-            if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯', '─━─━']):
+            if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯', '─━─━', '❖']):
                 continue
 
             seat_find = re.search(seat_regex, line)
@@ -436,7 +462,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             if roles_from_image:
                 ocr_used = True
 
-        parsed_players = []
+        extracted_role_list = []
         for p in temp_players:
             final_role = p['role']
             if not final_role:
@@ -444,10 +470,17 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                     final_role = roles_from_image[p['seat']]
                 else:
                     final_role = "ساده"
+            p['role'] = final_role
+            extracted_role_list.append(final_role)
 
-            side = detect_side(scenario, final_role)
+        # استنتاج هوشمند سناریو بر مبنای نقش‌های موجود
+        scenario = infer_scenario(extracted_role_list, raw_scenario)
+
+        parsed_players = []
+        for p in temp_players:
+            side = detect_side(scenario, p['role'])
             if side != "Independent":
-                parsed_players.append((p['name'], final_role.lower(), side))
+                parsed_players.append((p['name'], p['role'].lower(), side))
 
         if len(parsed_players) < 5:
             return False, "تعداد بازیکنان معتبر غیرمستقل کمتر از ۵ نفر بود"
@@ -822,12 +855,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🌟 **ویژگی‌های سامانه:**\n\n"
         f"🔹 **پشتیبانی از تفکیک کانال‌ها:**\n"
         f"داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند و می‌توانید کانال جدید ایجاد یا انتخاب کنید.\n\n"
-        f"🔹 **پروفایل شخصی خودکار:**\n"
-        f"با زدن «🔗 اتصال نام بازی من»، نام خود را متصل کنید تا با زدن «👤 کارنامه من» آمار اختصاصی‌تان را ببینید.\n\n"
-        f"🔹 **الگوریتم بیزی با ضریب ثبات سنگین:**\n"
-        f"ثبات در تعداد بازی‌های بالا ارزش‌گذاری می‌شود.\n\n"
+        f"🔹 **تشخیص هوشمند سناریو و پشتیبانی از Classic:**\n"
+        f"سناریوها به طور خودکار بر اساس ترکیب نقش‌های مافیا و مستقل (از جمله کلاسیک با نقش‌های دون و تروریست) استنتاج می‌شوند.\n\n"
         f"🔹 **موتور OCR ابری قدرتمند:**\n"
-        f"استخراج نقش‌ها حتی از لیست‌های Random.org بدون اشغال فضای رم و دیسک سرور.\n\n"
+        f"استخراج نقش‌ها حتی از لیست‌های معکوس Random.org بدون اشغال فضای سرور.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -837,9 +868,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📜 **راهنمای جامع سامانه:**\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "▫️ **تغییر کانال:** قبل از ارسال بازی، با زدن «📢 انتخاب / تغییر کانال» مشخص کنید داده‌ها متعلق به کدام کانال است.\n"
-        "▫️ **کارنامه شخصی:** با زدن «🔗 اتصال نام بازی من» اسمتان را متصل کنید تا با «👤 کارنامه من» آمار خود را ببینید.\n"
-        "▫️ **ارسال بازی:** متن و عکس ایونت را ارسال کنید تا در کانال فعال ثبت شود."
+        "▫️ **تغییر کانال:** با زدن «📢 انتخاب / تغییر کانال» کانال مدنظر را انتخاب کنید.\n"
+        "▫️ **ارسال بازی:** متن و عکس ایونت را بفرستید؛ ربات سناریو و نقش‌ها را خودکار استخراج می‌کند."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -1149,7 +1179,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با OCR سبک ابری (بدون نیاز به PyTorch) فعال شد...")
+    print("ربات با موتور استنتاج خودکار سناریو (از جمله کلاسیک) فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
