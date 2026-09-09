@@ -60,7 +60,7 @@ PLAYER_ALIASES = {
     'alireza': 'alireza kamali',
     'alireza k': 'alireza kamali',
     'hossein': 'hossein ss',
-    'hosein': 'hosein ss',
+    'hosein': 'hossein ss',
     'hosein ss': 'hossein ss',
     'h ss': 'hossein ss',
     'mmd': 'mmd4030',
@@ -83,6 +83,8 @@ PLAYER_ALIASES = {
     'alireza milan': 'alireza milan',
     'ebrahim': 'ebi',
     'ebi': 'ebi',
+    'ghaderi': 'qaderi',
+    'qaderi': 'qaderi',
 }
 
 def resolve_player_name(raw_name):
@@ -97,6 +99,9 @@ def resolve_player_name(raw_name):
     if name in PLAYER_ALIASES:
         return PLAYER_ALIASES[name]
 
+    if re.search(r'qaderi|ghaderi', name):
+        return 'qaderi'
+
     if re.search(r'^(mmd|moham+ad|mam+ad)(\s*4030)?$', name):
         return 'mmd4030'
 
@@ -108,6 +113,9 @@ def resolve_player_name(raw_name):
 
     if fuzz.ratio(name, 'ebrahim') >= 85 or fuzz.ratio(name, 'ebi') >= 90:
         return 'ebi'
+
+    if fuzz.ratio(name, 'qaderi') >= 80 or fuzz.ratio(name, 'ghaderi') >= 80:
+        return 'qaderi'
 
     return name
 
@@ -316,7 +324,8 @@ def merge_player_accounts(cursor):
         'alireza kamali': ['alireza', 'alireza k'],
         'hossein ss': ['hossein', 'hosein', 'hosein ss', 'h ss'],
         'alireza milan': ['milan'],
-        'ebi': ['ebrahim']
+        'ebi': ['ebrahim'],
+        'qaderi': ['ghaderi']
     }
 
     for target_name, aliases in merges.items():
@@ -498,8 +507,6 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         c = conn.cursor()
 
         if event_id != "0":
-            c.execute("SELECT 1 FROM processed_games WHERE channel_id = ? AND (event_id = ? || event_id = ?)", (channel_id, event_id, raw_event))
-            # اصلاح ساده برای SQLite
             c.execute("SELECT 1 FROM processed_games WHERE channel_id = ? AND (event_id = ?)", (channel_id, event_id))
             if c.fetchone():
                 conn.close()
@@ -667,7 +674,6 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="c
         m_rate = (p['m_wins'] * 100 // p['m_games']) if p['m_games'] > 0 else 0
         c_rate = (p['c_wins'] * 100 // p['c_games']) if p['c_games'] > 0 else 0
         
-        # استفاده از متن انگلیسی استاندارد برای جلوگیری از مربع شدن در PDF
         if idx == 1:
             badge = "1st Place"
         elif idx == 2:
@@ -843,14 +849,14 @@ async def flush_batch_worker(chat_id, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(flush_batch_worker(chat_id, context))
 
 async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030, Ebi, Alireza Milan)*")
+    await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030, Ebi, Alireza Milan, Qaderi)*")
     return SEARCH_STATE
 
 async def link_profile_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔗 **اتصال نام بازیکن در بازی:**\n"
         "نام انگلیسی خود را که در بازی‌ها ثبت می‌شود وارد کنید:\n"
-        "*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030, Ebi, Alireza Milan)*"
+        "*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030, Ebi, Alireza Milan, Qaderi)*"
     )
     return LINK_PROFILE_STATE
 
@@ -1013,7 +1019,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🌟 **ویژگی‌های سامانه:**\n\n"
         f"🔹 **راهنمای شکیل و استاندارد:** با زدن دکمه «📜 راهنمای رتبه‌بندی» توضیحات کامل الگوریتم بیزی را مشاهده کنید.\n"
         f"🔹 **۱۰ بازیکن برتر هر ساید:** رتبه‌بندی تخصصی ۱۰ نفر برتر مافیا و شهروند در لیدربرد و PDF.\n"
-        f"🔹 **هماهنگی کامل رتبه کارت شخصی با تالار افتخارات.**\n\n"
+        f"🔹 **ادغام هوشمند اسامی:** داده‌های Qaderi/Ghaderi، Ebrahim و... با حساب اصلی خود یکپارچه شده‌اند.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -1037,10 +1043,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "مهارت بازیکن در کنترل شب (مافیا) و استدلال روز (شهروند) به صورت کاملاً مجزا در دو جدول تفکیک و ارزیابی می‌شوند.\n\n"
 
         "🔍 **۴. یکپارچه‌سازی و عدم حساسیت به حروف:**\n"
-        "سیستم فاقد هرگونه حساسیت به حروف بزرگ و کوچک است و تمامی اسامی مستعار به صورت هوشمند ادغام می‌شوند.\n\n"
+        "سیستم فاقد هرگونه حساسیت به حروف بزرگ و کوچک است و تمامی اسامی مستعار (مانند Qaderi و Ghaderi) به صورت هوشمند ادغام می‌شوند.\n\n"
 
         "📄 **۵. تالار افتخارات PDF:**\n"
-        "با کلیک روی دکمه گزارش، فایل PDF شکیل شامل رتبه‌بندی کلی و ۱۰ بازیکن برتر هر ساید برای شما صادر می‌شود."
+        "با کلیک روی دکمه گزارش، فایل PDF شکیل و استاندارد (بدون کاراکترهای مربعی شکل) شامل رتبه‌بندی کلی و ۱۰ بازیکن برتر هر ساید برای شما صادر می‌شود."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -1362,7 +1368,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با رفع خطای مربعی PDF و راهنمای شکیل فعال شد...")
+    print("ربات با ادغام Qaderi، اصلاح PDF و راهنمای شکیل فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
