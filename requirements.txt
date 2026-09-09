@@ -3,5 +3,4 @@ fuzzywuzzy
 python-Levenshtein
 reportlab
 pillow
-numpy
-easyocr
+requests
