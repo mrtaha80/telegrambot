@@ -99,7 +99,6 @@ def resolve_player_name(raw_name):
     if name in PLAYER_ALIASES:
         return PLAYER_ALIASES[name]
 
-    # تطبیق هوشمند پیشرفته: اگر کلمه قادری یا ghaderi در هر جای نام مرکب (مثل m h qaderi) بود
     if re.search(r'\b(qaderi|ghaderi)\b', name) or 'قادری' in name:
         return 'qaderi'
 
@@ -329,7 +328,6 @@ def merge_player_accounts(cursor):
         'qaderi': ['ghaderi']
     }
 
-    # به طور خودکار هر رکورد دیتابیسی که شامل qaderi یا ghaderi باشد را با qaderi یکی کن
     cursor.execute("SELECT id, name FROM players WHERE LOWER(name) LIKE '%qaderi%' OR LOWER(name) LIKE '%ghaderi%'")
     qaderi_matches = cursor.fetchall()
     
@@ -1034,8 +1032,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
-        f"🔹 **هوش مصنوعی تطبیق اسامی:** شناسایی پیشرفته نام‌های مرکب (مثل M H Qaderi) و ادغام با Qaderi.\n"
-        f"🔹 **۱۰ بازیکن برتر هر ساید:** رتبه‌بندی تخصصی ۱۰ نفر برتر مافیا و شهروند در لیدربرد و PDF.\n"
+        f"🔹 **پایداری کامل تالار افتخارات:** رفع کامل خطاهای دکمه لیدربرد و گزارش PDF.\n"
+        f"🔹 **تشخیص پیشرفته اسامی مرکب:** ادغام دقیق نام‌هایی مثل M H Qaderi با هویت اصلی.\n"
         f"🔹 **هماهنگی کامل رتبه کارت شخصی با تالار افتخارات.**\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
@@ -1067,172 +1065,177 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-# ================= گزارش رسمی و لیدربرد =================
+# ================= گزارش رسمی و لیدربرد امن (بدون کرش) =================
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
-    c = conn.cursor()
-    ch_id, ch_name = get_user_channel(c, user_id)
-
-    placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
-    
-    c.execute(f'''
-        SELECT 
-            AVG(is_win) as global_win_mean,
-            AVG(CASE WHEN side = 'Mafia' THEN is_win END) as mafia_win_mean,
-            AVG(CASE WHEN side = 'Citizen' THEN is_win END) as citizen_win_mean
-        FROM matches m
-        JOIN players p ON p.id = m.player_id
-        WHERE LOWER(p.name) NOT IN ({placeholders}) 
-          AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
-    ''', [ep.lower() for ep in EXCLUDED_PLAYERS] + [ch_id, ch_id])
-    global_stats = c.fetchone()
-
-    m_global = global_stats[0] if (global_stats and global_stats[0] is not None) else 0.50
-    m_mafia = global_stats[1] if (global_stats and global_stats[1] is not None) else 0.50
-    m_citizen = global_stats[2] if (global_stats and global_stats[2] is not None) else 0.50
-
-    c.execute(f'''
-        SELECT 
-            LOWER(p.name),
-            COUNT(m.id) as total_games,
-            SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) as total_wins,
-            SUM(CASE WHEN m.side = 'Mafia' THEN 1 ELSE 0 END) as mafia_games,
-            SUM(CASE WHEN m.side = 'Mafia' AND m.is_win = 1 THEN 1 ELSE 0 END) as mafia_wins,
-            SUM(CASE WHEN m.side = 'Citizen' THEN 1 ELSE 0 END) as citizen_games,
-            SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
-        FROM players p
-        JOIN matches m ON p.id = m.player_id
-        WHERE LOWER(p.name) NOT IN ({placeholders}) 
-          AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
-        GROUP BY LOWER(p.name)
-        HAVING total_games >= 18
-    ''', [ep.lower() for ep in EXCLUDED_PLAYERS] + [ch_id, ch_id])
-    rows = c.fetchall()
-    conn.close()
-
-    if not rows:
-        await update.message.reply_text(
-            f"هنوز در کانال **{ch_name}** بازیکنی به حد نصاب حداقل ۱۸ بازی نرسیده است.\n"
-            f"برای مشاهده داده‌های کانال اصلی، کانال فعال را روی **cafe mafia** قرار دهید.",
-            parse_mode="Markdown",
-            reply_markup=get_main_keyboard()
-        )
-        return
-
-    C_GLOBAL = 12.0
-    C_SIDE = 6.0
-    VOLUME_POWER = 0.18
-
-    processed_list = []
-    mafia_candidates = []
-    citizen_candidates = []
-
-    for row in rows:
-        name, total_g, total_w, m_games, m_wins, c_games, c_wins = row
-        raw_win = (total_w * 100.0 / total_g)
-        base_bayes = ((total_w + (C_GLOBAL * m_global)) / (total_g + C_GLOBAL)) * 100.0
-        vol_boost = 1.0 + (VOLUME_POWER * math.log10((total_g / 18.0) + 1.0))
-        bayes_score = base_bayes * vol_boost
-
-        p_data = {
-            'name': name.lower(),
-            'total_games': total_g,
-            'total_wins': total_w,
-            'raw_win': raw_win,
-            'bayes_score': bayes_score,
-            'm_games': m_games,
-            'm_wins': m_wins,
-            'c_games': c_games,
-            'c_wins': c_wins
-        }
-        processed_list.append(p_data)
-
-        if m_games >= 9:
-            base_m = ((m_wins + (C_SIDE * m_mafia)) / (m_games + C_SIDE)) * 100.0
-            m_boost = 1.0 + (VOLUME_POWER * math.log10((m_games / 9.0) + 1.0))
-            m_bayes = base_m * m_boost
-            m_rate = (m_wins * 100 // m_games)
-            mafia_candidates.append({
-                'name': name.lower(),
-                'bayes': m_bayes,
-                'rate': m_rate,
-                'games': m_games,
-                'wins': m_wins
-            })
-
-        if c_games >= 9:
-            base_c = ((c_wins + (C_SIDE * m_citizen)) / (c_games + C_SIDE)) * 100.0
-            c_boost = 1.0 + (VOLUME_POWER * math.log10((c_games / 9.0) + 1.0))
-            c_bayes = base_c * c_boost
-            c_rate = (c_wins * 100 // c_games)
-            citizen_candidates.append({
-                'name': name.lower(),
-                'bayes': c_bayes,
-                'rate': c_rate,
-                'games': c_games,
-                'wins': c_wins
-            })
-
-    processed_list.sort(key=lambda x: (x['bayes_score'], x['total_games']), reverse=True)
-    mafia_candidates.sort(key=lambda x: (x['bayes'], x['games']), reverse=True)
-    citizen_candidates.sort(key=lambda x: (x['bayes'], x['games']), reverse=True)
-
-    report = f"👑 **جدول برترین‌های لیگ: {ch_name.upper()}** 👑\n"
-    report += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-    for idx, p in enumerate(processed_list, 1):
-        m_rate = (p['m_wins'] * 100 // p['m_games']) if p['m_games'] > 0 else 0
-        c_rate = (p['c_wins'] * 100 // p['c_games']) if p['c_games'] > 0 else 0
-        bar = make_bar(p['raw_win'], length=8)
-
-        if idx == 1:
-            icon = "🥇 𝐆𝐑𝐀𝐍𝐃𝐌𝐀𝐒𝐓𝐄𝐑"
-        elif idx == 2:
-            icon = "🥈 𝐌𝐀𝐒𝐓𝐄𝐑"
-        elif idx == 3:
-            icon = "🥉 𝐃𝐈𝐀𝐌𝐎𝐍𝐃"
-        elif idx <= 10:
-            icon = f"⚜️ رتبه #{idx}"
-        else:
-            icon = f"🎖 رتبه #{idx}"
-
-        report += f"{icon} • **{p['name'].title()}**\n"
-        report += f"💎 **امتیاز عملکرد:** `{p['bayes_score']:.2f}` | 🎮 **نبردها:** `{p['total_games']}`\n"
-        report += f"📊 وین‌ریت کل: {bar} `{p['raw_win']:.1f}%`\n"
-        report += f"🔪 مافیا: `{m_rate}%` ({p['m_wins']}/{p['m_games']}) | 🛡 شهر: `{c_rate}%` ({p['c_wins']}/{p['c_games']})\n"
-        report += "──────────────────────────\n"
-
-    report += "\n🔥 **۱۰ شکارچی برتر ساید مافیا:**\n"
-    if mafia_candidates:
-        medals = ["👑", "🩸", "💀", "🗡", "🎯", "🔥", "⚡️", "💎", "🌟", "⚜️"]
-        for r, m in enumerate(mafia_candidates[:10], 1):
-            report += f"{medals[r-1]} {r}. **{m['name'].title()}** ⟵ نمره: `{m['bayes']:.2f}` (برد: `{m['rate']}%` در `{m['games']}` بازی)\n"
-    else:
-        report += "بازیکنی با حداقل ۹ بازی مافیا یافت نشد.\n"
-
-    report += "\n🛡 **۱۰ قهرمان برتر ساید شهروند:**\n"
-    if citizen_candidates:
-        shields = ["🌟", "💎", "✨", "🛡", "⚜️", "👑", "🎯", "🔥", "⚡️", "🏆"]
-        for r, c_item in enumerate(citizen_candidates[:10], 1):
-            report += f"{shields[r-1]} {r}. **{c_item['name'].title()}** ⟵ نمره: `{c_item['bayes']:.2f}` (برد: `{c_item['rate']}%` در `{c_item['games']}` بازی)\n"
-    else:
-        report += "بازیکنی با حداقل ۹ بازی شهروندی یافت نشد.\n"
-
-    await send_large_text(update, report, context)
-
-    pdf_path = generate_pdf_report(processed_list, mafia_candidates, citizen_candidates, channel_name=ch_name)
     try:
-        with open(pdf_path, 'rb') as pdf_file:
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=pdf_file,
-                filename=f"CafeMafia_{ch_name}_Leaderboard.pdf",
-                caption=f"📜 **نسخه رسمی تالار افتخارات ({ch_name})**",
+        user_id = update.effective_user.id
+        conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+        c = conn.cursor()
+        ch_id, ch_name = get_user_channel(c, user_id)
+
+        placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
+        
+        c.execute(f'''
+            SELECT 
+                AVG(is_win) as global_win_mean,
+                AVG(CASE WHEN side = 'Mafia' THEN is_win END) as mafia_win_mean,
+                AVG(CASE WHEN side = 'Citizen' THEN is_win END) as citizen_win_mean
+            FROM matches m
+            JOIN players p ON p.id = m.player_id
+            WHERE LOWER(p.name) NOT IN ({placeholders}) 
+              AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
+        ''', [ep.lower() for ep in EXCLUDED_PLAYERS] + [ch_id, ch_id])
+        global_stats = c.fetchone()
+
+        m_global = global_stats[0] if (global_stats and global_stats[0] is not None) else 0.50
+        m_mafia = global_stats[1] if (global_stats and global_stats[1] is not None) else 0.50
+        m_citizen = global_stats[2] if (global_stats and global_stats[2] is not None) else 0.50
+
+        c.execute(f'''
+            SELECT 
+                LOWER(p.name),
+                COUNT(m.id) as total_games,
+                SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) as total_wins,
+                SUM(CASE WHEN m.side = 'Mafia' THEN 1 ELSE 0 END) as mafia_games,
+                SUM(CASE WHEN m.side = 'Mafia' AND m.is_win = 1 THEN 1 ELSE 0 END) as mafia_wins,
+                SUM(CASE WHEN m.side = 'Citizen' THEN 1 ELSE 0 END) as citizen_games,
+                SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
+            FROM players p
+            JOIN matches m ON p.id = m.player_id
+            WHERE LOWER(p.name) NOT IN ({placeholders}) 
+              AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
+            GROUP BY LOWER(p.name)
+            HAVING total_games >= 18
+        ''', [ep.lower() for ep in EXCLUDED_PLAYERS] + [ch_id, ch_id])
+        rows = c.fetchall()
+        conn.close()
+
+        if not rows:
+            await update.message.reply_text(
+                f"هنوز در کانال **{ch_name}** بازیکنی به حد نصاب حداقل ۱۸ بازی نرسیده است.\n"
+                f"برای مشاهده داده‌های کانال اصلی، کانال فعال را روی **cafe mafia** قرار دهید.",
+                parse_mode="Markdown",
                 reply_markup=get_main_keyboard()
             )
+            return
+
+        C_GLOBAL = 12.0
+        C_SIDE = 6.0
+        VOLUME_POWER = 0.18
+
+        processed_list = []
+        mafia_candidates = []
+        citizen_candidates = []
+
+        for row in rows:
+            name, total_g, total_w, m_games, m_wins, c_games, c_wins = row
+            raw_win = (total_w * 100.0 / total_g)
+            base_bayes = ((total_w + (C_GLOBAL * m_global)) / (total_g + C_GLOBAL)) * 100.0
+            vol_boost = 1.0 + (VOLUME_POWER * math.log10((total_g / 18.0) + 1.0))
+            bayes_score = base_bayes * vol_boost
+
+            p_data = {
+                'name': name.lower(),
+                'total_games': total_g,
+                'total_wins': total_w,
+                'raw_win': raw_win,
+                'bayes_score': bayes_score,
+                'm_games': m_games,
+                'm_wins': m_wins,
+                'c_games': c_games,
+                'c_wins': c_wins
+            }
+            processed_list.append(p_data)
+
+            if m_games >= 9:
+                base_m = ((m_wins + (C_SIDE * m_mafia)) / (m_games + C_SIDE)) * 100.0
+                m_boost = 1.0 + (VOLUME_POWER * math.log10((m_games / 9.0) + 1.0))
+                m_bayes = base_m * m_boost
+                m_rate = (m_wins * 100 // m_games)
+                mafia_candidates.append({
+                    'name': name.lower(),
+                    'bayes': m_bayes,
+                    'rate': m_rate,
+                    'games': m_games,
+                    'wins': m_wins
+                })
+
+            if c_games >= 9:
+                base_c = ((c_wins + (C_SIDE * m_citizen)) / (c_games + C_SIDE)) * 100.0
+                c_boost = 1.0 + (VOLUME_POWER * math.log10((c_games / 9.0) + 1.0))
+                c_bayes = base_c * c_boost
+                c_rate = (c_wins * 100 // c_games)
+                citizen_candidates.append({
+                    'name': name.lower(),
+                    'bayes': c_bayes,
+                    'rate': c_rate,
+                    'games': c_games,
+                    'wins': c_wins
+                })
+
+        processed_list.sort(key=lambda x: (x['bayes_score'], x['total_games']), reverse=True)
+        mafia_candidates.sort(key=lambda x: (x['bayes'], x['games']), reverse=True)
+        citizen_candidates.sort(key=lambda x: (x['bayes'], x['games']), reverse=True)
+
+        report = f"👑 **جدول برترین‌های لیگ: {ch_name.upper()}** 👑\n"
+        report += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        for idx, p in enumerate(processed_list, 1):
+            m_rate = (p['m_wins'] * 100 // p['m_games']) if p['m_games'] > 0 else 0
+            c_rate = (p['c_wins'] * 100 // p['c_games']) if p['c_games'] > 0 else 0
+            bar = make_bar(p['raw_win'], length=8)
+
+            if idx == 1:
+                icon = "🥇 𝐆𝐑𝐀𝐍𝐃𝐌𝐀𝐒𝐓𝐄𝐑"
+            elif idx == 2:
+                icon = "🥈 𝐌𝐀𝐒𝐓𝐄𝐑"
+            elif idx == 3:
+                icon = "🥉 𝐃𝐈𝐀𝐌𝐎𝐍𝐃"
+            elif idx <= 10:
+                icon = f"⚜️ رتبه #{idx}"
+            else:
+                icon = f"🎖 رتبه #{idx}"
+
+            report += f"{icon} • **{p['name'].title()}**\n"
+            report += f"💎 **امتیاز عملکرد:** `{p['bayes_score']:.2f}` | 🎮 **نبردها:** `{p['total_games']}`\n"
+            report += f"📊 وین‌ریت کل: {bar} `{p['raw_win']:.1f}%`\n"
+            report += f"🔪 مافیا: `{m_rate}%` ({p['m_wins']}/{p['m_games']}) | 🛡 شهر: `{c_rate}%` ({p['c_wins']}/{p['c_games']})\n"
+            report += "──────────────────────────\n"
+
+        report += "\n🔥 **۱۰ شکارچی برتر ساید مافیا:**\n"
+        if mafia_candidates:
+            medals = ["👑", "🩸", "💀", "🗡", "🎯", "🔥", "⚡️", "💎", "🌟", "⚜️"]
+            for r, m in enumerate(mafia_candidates[:10], 1):
+                report += f"{medals[r-1]} {r}. **{m['name'].title()}** ⟵ نمره: `{m['bayes']:.2f}` (برد: `{m['rate']}%` در `{m['games']}` بازی)\n"
+        else:
+            report += "بازیکنی با حداقل ۹ بازی مافیا یافت نشد.\n"
+
+        report += "\n🛡 **۱۰ قهرمان برتر ساید شهروند:**\n"
+        if citizen_candidates:
+            shields = ["🌟", "💎", "✨", "🛡", "⚜️", "👑", "🎯", "🔥", "⚡️", "🏆"]
+            for r, c_item in enumerate(citizen_candidates[:10], 1):
+                report += f"{shields[r-1]} {r}. **{c_item['name'].title()}** ⟵ نمره: `{c_item['bayes']:.2f}` (برد: `{c_item['rate']}%` در `{c_item['games']}` بازی)\n"
+        else:
+            report += "بازیکنی با حداقل ۹ بازی شهروندی یافت نشد.\n"
+
+        await send_large_text(update, report, context)
+
+        pdf_path = generate_pdf_report(processed_list, mafia_candidates, citizen_candidates, channel_name=ch_name)
+        try:
+            with open(pdf_path, 'rb') as pdf_file:
+                await context.bot.send_document(
+                    chat_id=update.effective_chat.id,
+                    document=pdf_file,
+                    filename=f"CafeMafia_{ch_name}_Leaderboard.pdf",
+                    caption=f"📜 **نسخه رسمی تالار افتخارات ({ch_name})**",
+                    reply_markup=get_main_keyboard()
+                )
+        except Exception as e:
+            print(f"Error sending PDF: {e}")
+
     except Exception as e:
-        print(f"Error sending PDF: {e}")
+        print(f"Error in report_command: {e}")
+        await update.message.reply_text("❌ خطا در تولید گزارش تالار افتخارات. لطفاً دوباره تلاش کنید.", reply_markup=get_main_keyboard())
 
 # ================= نمایش کارت اختصاصی بازیکن =================
 async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name: str):
@@ -1385,7 +1388,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با ادغام پیشرفته نام‌های مرکب Qaderi فعال شد...")
+    print("ربات با رفع کامل خطاهای تالار افتخارات و استخراج امن فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
