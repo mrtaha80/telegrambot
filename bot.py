@@ -323,9 +323,19 @@ def init_db():
         CREATE TABLE IF NOT EXISTS processed_games (
             game_signature TEXT,
             channel_id INTEGER,
+            event_id TEXT,
             PRIMARY KEY(game_signature, channel_id)
         )
     ''')
+
+    # بررسی و افزودن ستون event_id در صورت نیاز
+    c.execute("PRAGMA table_info(processed_games)")
+    cols = [r[1] for r in c.fetchall()]
+    if 'event_id' not in cols:
+        try:
+            c.execute("ALTER TABLE processed_games ADD COLUMN event_id TEXT")
+        except Exception:
+            pass
 
     target_names = {'omid', 'alireza kamali', 'hossein ss', 'mmd4030'}
     for target in target_names:
@@ -379,7 +389,7 @@ def get_or_create_player(cursor, raw_name):
     row = cursor.fetchone()
     return row[0], clean_name
 
-# ================= ثبت داده بازی =================
+# ================= ثبت داده بازی با تفکیک دقیق تکراری =================
 def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1):
     try:
         norm = normalize_text(raw_text)
@@ -392,7 +402,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         raw_scenario = scenario_match.group(1).strip() if scenario_match else ""
 
         if not win_match:
-            return False, f"ایونت `{event_id}`: سطر نتیجه (WIN/برنده) در متن یافت نشد"
+            return False, f"ایونت `{event_id}`: سطر نتیجه برنده بازی یافت نشد"
 
         win_text = win_match.group(1).strip().lower()
 
@@ -403,11 +413,11 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             winning_side = "Citizen"
 
         if not winning_side:
-            return False, f"ایونت `{event_id}`: ساید برنده از متن '{win_text}' تشخیص داده نشد"
+            return False, f"ایونت `{event_id}`: ساید برنده از متن '{win_text}' مشخص نیست"
 
         players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|❖|☆|$)', norm, re.IGNORECASE)
         if not players_match:
-            return False, f"ایونت `{event_id}`: سرفصل لیست بازیکنان پیدا نشد"
+            return False, f"ایونت `{event_id}`: لیست بازیکنان پیدا نشد"
 
         players_block = players_match.group(1)
         temp_players = []
@@ -469,7 +479,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             seat_counter += 1
 
         if len(temp_players) < 5:
-            return False, f"ایونت `{event_id}`: تعداد بازیکنان خوانده شده کمتر از ۵ نفر بود ({len(temp_players)} نفر)"
+            return False, f"ایونت `{event_id}`: تعداد بازیکنان شناسایی‌شده کمتر از ۵ نفر بود"
 
         roles_from_image = {}
         ocr_used = False
@@ -500,11 +510,28 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         if len(parsed_players) < 5:
             return False, f"ایونت `{event_id}`: تعداد بازیکنان معتبر کمتر از ۵ نفر بود"
 
-        game_signature = f"ev_{event_id}_sc_{scenario.lower()[:5]}"
+        # ساخت هش اثر انگشت مستحکم (بر اساس کانال، ایونت، سایدها، و چینش اعضا)
+        players_fingerprint = "-".join(sorted([f"{p[0]}:{p[1]}" for p in parsed_players]))
+        full_identity = f"ch_{channel_id}_ev_{event_id}_sc_{scenario.lower()[:8]}_{winning_side}_{players_fingerprint}"
+        game_signature = hashlib.sha256(full_identity.encode('utf-8')).hexdigest()
 
         conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
         c = conn.cursor()
 
+        # ۱. بررسی بر اساس اثر انگشت دقیق محتوای بازی
+        c.execute("SELECT 1 FROM processed_games WHERE game_signature = ? AND channel_id = ?", (game_signature, channel_id))
+        if c.fetchone():
+            conn.close()
+            return False, f"ایونت `{event_id}`: قبلاً ثبت شده و تکراری است (رد شد)"
+
+        # ۲. بررسی بر اساس شماره ایونت یکتا در این کانال
+        if event_id and event_id != "0":
+            c.execute("SELECT 1 FROM processed_games WHERE event_id = ? AND channel_id = ?", (event_id, channel_id))
+            if c.fetchone():
+                conn.close()
+                return False, f"ایونت `{event_id}`: شماره ایونت تکراری است و قبلاً ثبت شده بود"
+
+        # درج رکوردها
         for name, role, side in parsed_players:
             player_id, _ = get_or_create_player(c, name)
             if not player_id:
@@ -516,7 +543,11 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (player_id, channel_id, game_signature, event_id, scenario, side, is_win))
 
-        c.execute("INSERT OR REPLACE INTO processed_games (game_signature, channel_id) VALUES (?, ?)", (game_signature, channel_id))
+        c.execute('''
+            INSERT OR REPLACE INTO processed_games (game_signature, channel_id, event_id)
+            VALUES (?, ?, ?)
+        ''', (game_signature, channel_id, event_id))
+
         conn.commit()
         conn.close()
 
@@ -531,7 +562,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
 
     except Exception as e:
         print(f"Error parsing event: {e}")
-        return False, f"خطای سیستمی در تحلیل: {str(e)}"
+        return False, f"خطای سیستمی: {str(e)}"
 
 # ================= ساخت فایل PDF =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="cafe mafia", filename="Mafia_Leaderboard.pdf"):
@@ -665,7 +696,6 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
     async with DB_LOCK:
         for text, img_bytes, msg_id in batch_data:
-            # اجرای غیرمسدودکننده برای جلوگیری از هنگ کردن ربات
             ok, res = await asyncio.to_thread(process_game_data, text, img_bytes, msg_id, ch_id)
             if ok:
                 added += 1
@@ -691,8 +721,8 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
         f"📍 کانال فعال: `{ch_name}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📥 کل فایل‌ها و پیام‌ها: `{len(batch_data)}`\n"
-        f"✨ بازی‌های تایید شده: `{added}`\n"
-        f"🔁 رد شده‌ها: `{len(batch_data) - added}`\n"
+        f"✨ بازی‌های جدید تایید شده: `{added}`\n"
+        f"🔁 رد شده‌ها (تکراری یا نامعتبر): `{len(batch_data) - added}`\n"
         f"🏛 کل بازی‌های ثبت‌شده در این کانال: `{all_stored_games}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
     )
@@ -713,7 +743,6 @@ async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
     await send_large_text(chat_id, summary_text, context)
 
 async def delayed_flush(chat_id, context: ContextTypes.DEFAULT_TYPE):
-    # تاخیر ۳.۵ ثانیه‌ای از آخرین پیام
     await asyncio.sleep(3.5)
     await flush_batch(chat_id, context)
 
@@ -863,7 +892,6 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
 
         BATCH_STORAGE[chat_id].append((raw_content, image_bytes, msg.message_id))
 
-        # اگر تسکی از قبل فعال نبود، تسک جدید بساز (جلوگیری از ریست شدن ابدی)
         if chat_id not in BATCH_TASKS or BATCH_TASKS[chat_id].done():
             BATCH_TASKS[chat_id] = asyncio.create_task(delayed_flush(chat_id, context))
 
@@ -883,10 +911,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🌟 **ویژگی‌های سامانه:**\n\n"
         f"🔹 **پشتیبانی از تفکیک کانال‌ها:**\n"
         f"داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند و می‌توانید کانال جدید ایجاد یا انتخاب کنید.\n\n"
-        f"🔹 **تشخیص هوشمند سناریو و پشتیبانی از Classic:**\n"
-        f"سناریوها به طور خودکار بر اساس ترکیب نقش‌های مافیا و مستقل استنتاج می‌شوند.\n\n"
+        f"🔹 **تشخیص قوی بازی‌های تکراری:**\n"
+        f"جلوگیری قطعی از ثبت بازی‌های تکراری با الگوریتم اثرانگشت محتوا و شماره ایونت.\n\n"
         f"🔹 **پردازش پایدار بسته‌های سنگین:**\n"
-        f"پشتیبانی از دریافت و آنالیز ده‌ها بازی همزمان و ارسال گزارش کامل بدون محدودیت متن.\n\n"
+        f"آنالیز ده‌ها بازی به صورت همزمان بدون وقفه.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -897,7 +925,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📜 **راهنمای جامع سامانه:**\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "▫️ **تغییر کانال:** با زدن «📢 انتخاب / تغییر کانال» کانال مدنظر را انتخاب کنید.\n"
-        "▫️ **ارسال بازی:** متن و عکس ایونت‌ها را بفرستید؛ پس از اتمام ارسال، گزارش دقیق بررسی ارسال می‌شود."
+        "▫️ **ارسال بازی:** متن و عکس ایونت‌ها را بفرستید؛ گزارش کامل تایید و رد به همراه جزئیات برای شما ارسال می‌شود."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -979,7 +1007,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'm_games': m_games,
             'm_wins': m_wins,
             'c_games': c_games,
-            'c_wins': c_wins
+            'c_wins': cw
         }
         processed_list.append(p_data)
 
@@ -1207,7 +1235,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با موتور استنتاج خودکار سناریو و گزارش‌دهی تضمینی فعال شد...")
+    print("ربات با موتور پیشرفته تشخیص بازی‌های تکراری و استنتاج سناریو فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
