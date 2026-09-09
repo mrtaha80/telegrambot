@@ -41,9 +41,8 @@ logging.getLogger('fuzzywuzzy').setLevel(logging.ERROR)
 BOT_TOKEN = '8936060141:AAHD7N56eK7FtIq_FBy8E1txGNKkV2lWQjI'
 
 BATCH_STORAGE = {}
-BATCH_TASKS = {}
-TOTAL_PROCESSED_COUNT = 0
-DB_LOCK = asyncio.Lock()
+BATCH_TIMERS = {}
+IS_PROCESSING = set()
 
 SEARCH_STATE = 1
 LINK_PROFILE_STATE = 2
@@ -78,7 +77,7 @@ PLAYER_ALIASES = {
 def resolve_player_name(raw_name):
     name = raw_name.strip().lower()
     name = re.sub(rf'[{SEAT_SYMBOLS}]', '', name)
-    name = re.sub(r'[\.\-_:]', ' ', name)
+    name = re.sub(r'[\.\-_:⚜️👑💥☆]', ' ', name)
     name = " ".join(name.split())
 
     if not name:
@@ -119,7 +118,6 @@ def normalize_text(text):
     return text
 
 def clean_event_id(raw_id):
-    """استانداردسازی شماره ایونت به شکل عددی تمیز (حذف صفرهای ابتدایی)"""
     if not raw_id:
         return "0"
     digits = re.sub(r'\D', '', str(raw_id))
@@ -162,7 +160,7 @@ def extract_roles_from_image(image_bytes):
                 'scale': True
             },
             proxies=proxies,
-            timeout=20
+            timeout=12
         )
         result = response.json()
         if not result.get('IsErroredOnProcessing') and result.get('ParsedResults'):
@@ -188,8 +186,8 @@ def extract_roles_from_image(image_bytes):
         if not line:
             continue
 
-        end_match = re.search(r'(.+?)[\s\.\:\-\/•]+([1-9]|10)$', line)
-        start_match = re.search(r'^(?:[^\d]*)([1-9]|10)[\s\.\:\-\/•]+(.+)$', line)
+        end_match = re.search(r'(.+?)[\s\.\:\-\/•]+([1-9]|10|11|12)$', line)
+        start_match = re.search(r'^(?:[^\d]*)([1-9]|10|11|12)[\s\.\:\-\/•]+(.+)$', line)
 
         seat_num = None
         role_cand = None
@@ -274,7 +272,7 @@ def detect_side(scenario, role):
 
     return "Citizen"
 
-# ================= دیتابیس هوشمند و پاکسازی سوابق تکراری =================
+# ================= دیتابیس =================
 def init_db():
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
     c = conn.cursor()
@@ -337,7 +335,6 @@ def init_db():
         )
     ''')
 
-    # افزودن ستون event_id در صورت نبود
     c.execute("PRAGMA table_info(processed_games)")
     cols = [r[1] for r in c.fetchall()]
     if 'event_id' not in cols:
@@ -345,20 +342,6 @@ def init_db():
             c.execute("ALTER TABLE processed_games ADD COLUMN event_id TEXT")
         except Exception:
             pass
-
-    # پاکسازی رکوردهای تکراری که قبلاً به اشتباه چندبار ثبت شده بودند
-    try:
-        c.execute('''
-            DELETE FROM matches
-            WHERE id NOT IN (
-                SELECT MIN(id)
-                FROM matches
-                GROUP BY player_id, channel_id, event_id
-            )
-            AND event_id IS NOT NULL AND event_id != '0'
-        ''')
-    except Exception as e:
-        print(f"Error cleaning match duplicates: {e}")
 
     target_names = {'omid', 'alireza kamali', 'hossein ss', 'mmd4030'}
     for target in target_names:
@@ -412,7 +395,7 @@ def get_or_create_player(cursor, raw_name):
     row = cursor.fetchone()
     return row[0], clean_name
 
-# ================= موتور هوشمند بررسی و ثبت ضد تکرار =================
+# ================= ثبت داده بازی =================
 def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1):
     try:
         norm = normalize_text(raw_text)
@@ -439,25 +422,22 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         if not winning_side:
             return False, f"ایونت `{event_id}`: ساید برنده از متن '{win_text}' مشخص نیست"
 
-        # بررسی قطعی شماره ایونت قبل از هدر رفتن منابع
         conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
         c = conn.cursor()
 
         if event_id != "0":
-            # بررسی 1: آیا این شماره ایونت قبلاً در جدول processed_games ذخیره شده است؟
             c.execute("SELECT 1 FROM processed_games WHERE channel_id = ? AND (event_id = ? OR event_id = ?)", (channel_id, event_id, raw_event))
             if c.fetchone():
                 conn.close()
-                return False, f"ایونت `{event_id}`: این بازی قبلاً در دیتابیس ثبت شده است (تکراری)"
+                return False, f"ایونت `{event_id}`: قبلاً در دیتابیس ثبت شده است (تکراری)"
 
-            # بررسی 2: آیا بازی‌های این ایونت در جدول مسابقات ثبت شده‌اند؟
             c.execute("SELECT COUNT(*) FROM matches WHERE channel_id = ? AND (event_id = ? OR event_id = ?)", (channel_id, event_id, raw_event))
             existing_matches = c.fetchone()[0]
             if existing_matches >= 5:
                 conn.close()
-                return False, f"ایونت `{event_id}`: سوابق این ایونت قبلاً در جدول مسابقات وجود دارد (تکراری)"
+                return False, f"ایونت `{event_id}`: سوابق این ایونت قبلاً وجود دارد (تکراری)"
 
-        players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|❖|☆|$)', norm, re.IGNORECASE)
+        players_match = re.search(r'(?:players|بازیکنان|پلیرها)([\s\S]*?)(?:winner|win|🏆|❖|☆|💥|$)', norm, re.IGNORECASE)
         if not players_match:
             conn.close()
             return False, f"ایونت `{event_id}`: لیست بازیکنان پیدا نشد"
@@ -467,11 +447,11 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         seat_counter = 1
         needs_image_ocr = False
 
-        seat_regex = rf'^[✦\s\/\•\:\.\-]*([0-9]+|[{SEAT_SYMBOLS}])'
+        seat_regex = rf'^[✦\s\/\•\:\.\-░👑📡⚜️➖]*([0-9]+|[{SEAT_SYMBOLS}])'
 
         for line in players_block.strip().splitlines():
             line = line.strip()
-            if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯', '─━─━', '❖', '🌕']):
+            if not line or any(sym in line for sym in ['━', '┄', '─', '🥀', '🎭', '🕯', '─━─━', '❖', '🌕', '☆➖', '👑']):
                 continue
 
             seat_find = re.search(seat_regex, line)
@@ -484,6 +464,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                     current_seat = int(seat_raw)
 
             clean_line = deep_clean_line(line)
+            clean_line = re.sub(r'^[░👑📡⚜️\s]+', '', clean_line).strip()
             if not clean_line:
                 continue
 
@@ -496,12 +477,12 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
                 role = lang_split.group(2).strip()
             else:
                 tokens = clean_line.split()
-                if len(tokens) >= 2:
+                if len(tokens) >= 2 and any(ch in tokens[1] for ch in 'آابپتثجچحخدذرزژسشصضطظعغفقکگلمنوهی'):
                     name = tokens[0]
                     role = " ".join(tokens[1:])
                 else:
-                    name = clean_line
-                    role = ""
+                    name = tokens[0] if tokens else clean_line
+                    role = " ".join(tokens[1:]) if len(tokens) > 1 else ""
 
             if not name or len(name) < 2 or not re.search(r'[a-zA-Z\u0600-\u06FF]', name):
                 continue
@@ -523,7 +504,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
 
         if len(temp_players) < 5:
             conn.close()
-            return False, f"ایونت `{event_id}`: تعداد بازیکنان شناسایی‌شده کمتر از ۵ نفر بود"
+            return False, f"ایونت `{event_id}`: تعداد بازیکنان شناسایی‌شده کمتر از ۵ نفر بود ({len(temp_players)} نفر)"
 
         roles_from_image = {}
         ocr_used = False
@@ -555,18 +536,15 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
             conn.close()
             return False, f"ایونت `{event_id}`: تعداد بازیکنان معتبر کمتر از ۵ نفر بود"
 
-        # اثرانگشت غیرقابل جعل و دقیق محتوای مسابقه
         players_fingerprint = "-".join(sorted([f"{p[0]}:{p[1]}" for p in parsed_players]))
         full_identity = f"ch_{channel_id}_ev_{event_id}_sc_{scenario.lower()[:8]}_{winning_side}_{players_fingerprint}"
         game_signature = hashlib.sha256(full_identity.encode('utf-8')).hexdigest()
 
-        # بررسی 3: تطبیق امضای کامل
         c.execute("SELECT 1 FROM processed_games WHERE game_signature = ? AND channel_id = ?", (game_signature, channel_id))
         if c.fetchone():
             conn.close()
-            return False, f"ایونت `{event_id}`: محتوای این بازی دقیقاً تکراری است (رد شد)"
+            return False, f"ایونت `{event_id}`: محتوای این بازی قبلاً ثبت شده است (تکراری)"
 
-        # درج امن و قطعی
         for name, role, side in parsed_players:
             player_id, _ = get_or_create_player(c, name)
             if not player_id:
@@ -705,81 +683,83 @@ def get_main_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# ================= هندلرهای تلگرام =================
-async def flush_batch(chat_id, context: ContextTypes.DEFAULT_TYPE):
-    global TOTAL_PROCESSED_COUNT
-
-    batch_data = BATCH_STORAGE.pop(chat_id, [])
-    BATCH_TASKS.pop(chat_id, None)
-
-    if not batch_data:
+# ================= مدیریت دسته‌ای پایدار بدون قفل متداخل =================
+async def flush_batch_worker(chat_id, context: ContextTypes.DEFAULT_TYPE):
+    if chat_id in IS_PROCESSING:
         return
+    IS_PROCESSING.add(chat_id)
 
-    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
-    c = conn.cursor()
-    ch_id, ch_name = get_user_channel(c, chat_id)
-    conn.close()
+    try:
+        batch_data = BATCH_STORAGE.pop(chat_id, [])
+        BATCH_TIMERS.pop(chat_id, None)
 
-    status_msg = await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"⏳ در حال پردازش دقیق و استخراج {len(batch_data)} مورد دریافتی... لطفاً صبور باشید."
-    )
+        if not batch_data:
+            return
 
-    added = 0
-    accepted_details = []
-    rejected_reasons = []
+        conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+        c = conn.cursor()
+        ch_id, ch_name = get_user_channel(c, chat_id)
+        conn.close()
 
-    async with DB_LOCK:
+        status_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"⏳ در حال پردازش {len(batch_data)} مورد دریافتی... لطفاً شکیبا باشید."
+        )
+
+        added = 0
+        accepted_details = []
+        rejected_reasons = []
+
         for text, img_bytes, msg_id in batch_data:
-            ok, res = await asyncio.to_thread(process_game_data, text, img_bytes, msg_id, ch_id)
+            ok, res = process_game_data(text, img_bytes, msg_id, ch_id)
             if ok:
                 added += 1
                 accepted_details.append(res)
             else:
                 rejected_reasons.append(str(res))
+            await asyncio.sleep(0.05)
 
-    TOTAL_PROCESSED_COUNT += added
+        conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM processed_games WHERE (channel_id = ? OR channel_id IS NULL)", (ch_id,))
+        all_stored_games = c.fetchone()[0]
+        conn.close()
 
-    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM processed_games WHERE (channel_id = ? OR channel_id IS NULL)", (ch_id,))
-    all_stored_games = c.fetchone()[0]
-    conn.close()
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
 
-    try:
-        await status_msg.delete()
-    except Exception:
-        pass
+        summary_text = (
+            f"⚡️ **نتیجه بررسی و ثبت بسته ارسالی**\n"
+            f"📍 کانال فعال: `{ch_name}`\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"📥 کل پیام‌های پردازش‌شده: `{len(batch_data)}`\n"
+            f"✨ بازی‌های جدید تایید شده: `{added}`\n"
+            f"🔁 رد شده‌ها (تکراری یا نامعتبر): `{len(batch_data) - added}`\n"
+            f"🏛 کل بازی‌های این کانال: `{all_stored_games}`\n"
+            f"━━━━━━━━━━━━━━━━━━━\n\n"
+        )
 
-    summary_text = (
-        f"⚡️ **نتیجه بررسی و ثبت بسته ارسالی**\n"
-        f"📍 کانال فعال: `{ch_name}`\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📥 کل فایل‌ها و پیام‌ها: `{len(batch_data)}`\n"
-        f"✨ بازی‌های جدید تایید شده: `{added}`\n"
-        f"🔁 رد شده‌ها (تکراری یا نامعتبر): `{len(batch_data) - added}`\n"
-        f"🏛 کل بازی‌های ثبت‌شده در این کانال: `{all_stored_games}`\n"
-        f"━━━━━━━━━━━━━━━━━━━\n\n"
-    )
+        if accepted_details:
+            summary_text += "📋 **بازی‌های جدید تایید و ثبت‌شده:**\n"
+            for idx, g in enumerate(accepted_details, 1):
+                ocr_status = "📷 عکس با OCR" if g['ocr_used'] else "📝 متن"
+                winner_icon = "🔪 مافیا" if g['winning_side'] == "Mafia" else "🛡 شهروند"
+                summary_text += f"{idx}. ایونت `{g['event_id']}` ({g['scenario']}) ⟵ برنده: {winner_icon} [{ocr_status}]\n"
+            summary_text += "\n"
 
-    if accepted_details:
-        summary_text += "📋 **بازی‌های جدید تایید و ثبت‌شده:**\n"
-        for idx, g in enumerate(accepted_details, 1):
-            ocr_status = "📷 عکس با OCR" if g['ocr_used'] else "📝 متن"
-            winner_icon = "🔪 مافیا" if g['winning_side'] == "Mafia" else "🛡 شهروند"
-            summary_text += f"{idx}. ایونت `{g['event_id']}` ({g['scenario']}) ⟵ برنده: {winner_icon} [{ocr_status}]\n"
-        summary_text += "\n"
+        if rejected_reasons:
+            summary_text += "⚠️ **دلایل رد شدن سایر موارد:**\n"
+            for reason in rejected_reasons:
+                summary_text += f"• {reason}\n"
 
-    if rejected_reasons:
-        summary_text += "⚠️ **دلایل رد شدن سایر موارد:**\n"
-        for idx, reason in enumerate(rejected_reasons, 1):
-            summary_text += f"• {reason}\n"
+        await send_large_text(chat_id, summary_text, context)
 
-    await send_large_text(chat_id, summary_text, context)
-
-async def delayed_flush(chat_id, context: ContextTypes.DEFAULT_TYPE):
-    await asyncio.sleep(3.5)
-    await flush_batch(chat_id, context)
+    finally:
+        IS_PROCESSING.discard(chat_id)
+        if chat_id in BATCH_STORAGE and BATCH_STORAGE[chat_id]:
+            asyncio.create_task(flush_batch_worker(chat_id, context))
 
 async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔎 **نام انگلیسی بازیکن را وارد کنید:**\n*(مثال: Omid, Alireza Kamali, Hossein SS, Mmd4030)*")
@@ -888,6 +868,10 @@ async def my_profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     player_name = row[0]
     await show_player_card(update, player_name, ch_id, ch_name)
 
+async def trigger_delayed_worker(chat_id, context: ContextTypes.DEFAULT_TYPE):
+    await asyncio.sleep(4.0)
+    await flush_batch_worker(chat_id, context)
+
 async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.channel_post or update.message
     if not msg:
@@ -918,8 +902,8 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
 
     norm_content = normalize_text(raw_content).lower()
 
-    if (any(k in norm_content for k in ['player', 'بازیکن', 'سیت', 'ساده', 'مافیا']) and 
-        any(w in norm_content for w in ['win', 'برد', 'شهروند', 'مافیا', 'کیاس'])) or image_bytes:
+    if (any(k in norm_content for k in ['player', 'بازیکن', 'سیت', 'ساده', 'مافیا', 'event', 'ایونت']) and 
+        any(w in norm_content for w in ['win', 'برد', 'شهروند', 'مافیا', 'کیاس', 'شهر'])) or image_bytes:
 
         chat_id = msg.chat_id
         if chat_id not in BATCH_STORAGE:
@@ -927,8 +911,10 @@ async def handle_incoming_messages(update: Update, context: ContextTypes.DEFAULT
 
         BATCH_STORAGE[chat_id].append((raw_content, image_bytes, msg.message_id))
 
-        if chat_id not in BATCH_TASKS or BATCH_TASKS[chat_id].done():
-            BATCH_TASKS[chat_id] = asyncio.create_task(delayed_flush(chat_id, context))
+        if chat_id in BATCH_TIMERS:
+            BATCH_TIMERS[chat_id].cancel()
+
+        BATCH_TIMERS[chat_id] = asyncio.create_task(trigger_delayed_worker(chat_id, context))
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name if update.effective_user else "همراه گرامی"
@@ -948,8 +934,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"داده‌های دیتابیس در کانال **cafe mafia** ثبت هستند و می‌توانید کانال جدید ایجاد یا انتخاب کنید.\n\n"
         f"🔹 **تشخیص قطعی بازی‌های تکراری:**\n"
         f"بررسی ۳ لایه با شناسه ایونت عددی، هش ترکیب اعضا و سوابق ثبت‌شده قبلی.\n\n"
-        f"🔹 **پردازش بدون قفل بسته‌های بزرگ:**\n"
-        f"پردازش همزمان و ارسال گزارش دقیق برای تمام موارد دریافتی.\n\n"
+        f"🔹 **پردازش پایدار بسته‌های سنگین:**\n"
+        f"پردازش همزمان و ارسال گزارش دقیق برای تمام موارد دریافتی بدون قفل شدن ربات.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -967,47 +953,46 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= گزارش رسمی و لیدربرد =================
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    async with DB_LOCK:
-        conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
-        c = conn.cursor()
-        ch_id, ch_name = get_user_channel(c, user_id)
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+    c = conn.cursor()
+    ch_id, ch_name = get_user_channel(c, user_id)
 
-        placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
-        
-        c.execute(f'''
-            SELECT 
-                AVG(is_win) as global_win_mean,
-                AVG(CASE WHEN side = 'Mafia' THEN is_win END) as mafia_win_mean,
-                AVG(CASE WHEN side = 'Citizen' THEN is_win END) as citizen_win_mean
-            FROM matches m
-            JOIN players p ON p.id = m.player_id
-            WHERE LOWER(p.name) NOT IN ({placeholders}) 
-              AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
-        ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
-        global_stats = c.fetchone()
+    placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
+    
+    c.execute(f'''
+        SELECT 
+            AVG(is_win) as global_win_mean,
+            AVG(CASE WHEN side = 'Mafia' THEN is_win END) as mafia_win_mean,
+            AVG(CASE WHEN side = 'Citizen' THEN is_win END) as citizen_win_mean
+        FROM matches m
+        JOIN players p ON p.id = m.player_id
+        WHERE LOWER(p.name) NOT IN ({placeholders}) 
+          AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
+    ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
+    global_stats = c.fetchone()
 
-        m_global = global_stats[0] if (global_stats and global_stats[0] is not None) else 0.50
-        m_mafia = global_stats[1] if (global_stats and global_stats[1] is not None) else 0.50
-        m_citizen = global_stats[2] if (global_stats and global_stats[2] is not None) else 0.50
+    m_global = global_stats[0] if (global_stats and global_stats[0] is not None) else 0.50
+    m_mafia = global_stats[1] if (global_stats and global_stats[1] is not None) else 0.50
+    m_citizen = global_stats[2] if (global_stats and global_stats[2] is not None) else 0.50
 
-        c.execute(f'''
-            SELECT 
-                LOWER(p.name),
-                COUNT(m.id) as total_games,
-                SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) as total_wins,
-                SUM(CASE WHEN m.side = 'Mafia' THEN 1 ELSE 0 END) as mafia_games,
-                SUM(CASE WHEN m.side = 'Mafia' AND m.is_win = 1 THEN 1 ELSE 0 END) as mafia_wins,
-                SUM(CASE WHEN m.side = 'Citizen' THEN 1 ELSE 0 END) as citizen_games,
-                SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
-            FROM players p
-            JOIN matches m ON p.id = m.player_id
-            WHERE LOWER(p.name) NOT IN ({placeholders}) 
-              AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
-            GROUP BY LOWER(p.name)
-            HAVING total_games >= 18
-        ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
-        rows = c.fetchall()
-        conn.close()
+    c.execute(f'''
+        SELECT 
+            LOWER(p.name),
+            COUNT(m.id) as total_games,
+            SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) as total_wins,
+            SUM(CASE WHEN m.side = 'Mafia' THEN 1 ELSE 0 END) as mafia_games,
+            SUM(CASE WHEN m.side = 'Mafia' AND m.is_win = 1 THEN 1 ELSE 0 END) as mafia_wins,
+            SUM(CASE WHEN m.side = 'Citizen' THEN 1 ELSE 0 END) as citizen_games,
+            SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
+        FROM players p
+        JOIN matches m ON p.id = m.player_id
+        WHERE LOWER(p.name) NOT IN ({placeholders}) 
+          AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
+        GROUP BY LOWER(p.name)
+        HAVING total_games >= 18
+    ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
+    rows = c.fetchall()
+    conn.close()
 
     if not rows:
         await update.message.reply_text(
@@ -1140,38 +1125,37 @@ async def show_player_card(update: Update, query_name: str, ch_id: int, ch_name:
         await update.message.reply_text(f"❌ بازیکنی با نام «{query}» در لیست سیاه آماری قرار دارد.", reply_markup=get_main_keyboard())
         return
 
-    async with DB_LOCK:
-        conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
-        c = conn.cursor()
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+    c = conn.cursor()
 
-        placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
-        c.execute(f'''
-            SELECT AVG(is_win) FROM matches m
-            JOIN players p ON p.id = m.player_id
-            WHERE LOWER(p.name) NOT IN ({placeholders}) 
-              AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
-        ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
-        global_avg_row = c.fetchone()
-        m_global = global_avg_row[0] if (global_avg_row and global_avg_row[0] is not None) else 0.50
+    placeholders = ','.join(['?'] * len(EXCLUDED_PLAYERS))
+    c.execute(f'''
+        SELECT AVG(is_win) FROM matches m
+        JOIN players p ON p.id = m.player_id
+        WHERE LOWER(p.name) NOT IN ({placeholders}) 
+          AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
+    ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
+    global_avg_row = c.fetchone()
+    m_global = global_avg_row[0] if (global_avg_row and global_avg_row[0] is not None) else 0.50
 
-        c.execute(f'''
-            SELECT 
-                p.id,
-                LOWER(p.name),
-                COUNT(m.id) as total_games,
-                SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) as total_wins,
-                SUM(CASE WHEN m.side = 'Mafia' THEN 1 ELSE 0 END) as mafia_games,
-                SUM(CASE WHEN m.side = 'Mafia' AND m.is_win = 1 THEN 1 ELSE 0 END) as mafia_wins,
-                SUM(CASE WHEN m.side = 'Citizen' THEN 1 ELSE 0 END) as citizen_games,
-                SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
-            FROM players p
-            JOIN matches m ON p.id = m.player_id
-            WHERE LOWER(p.name) NOT IN ({placeholders}) 
-              AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
-            GROUP BY LOWER(p.name)
-        ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
-        all_players_raw = c.fetchall()
-        conn.close()
+    c.execute(f'''
+        SELECT 
+            p.id,
+            LOWER(p.name),
+            COUNT(m.id) as total_games,
+            SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) as total_wins,
+            SUM(CASE WHEN m.side = 'Mafia' THEN 1 ELSE 0 END) as mafia_games,
+            SUM(CASE WHEN m.side = 'Mafia' AND m.is_win = 1 THEN 1 ELSE 0 END) as mafia_wins,
+            SUM(CASE WHEN m.side = 'Citizen' THEN 1 ELSE 0 END) as citizen_games,
+            SUM(CASE WHEN m.side = 'Citizen' AND m.is_win = 1 THEN 1 ELSE 0 END) as citizen_wins
+        FROM players p
+        JOIN matches m ON p.id = m.player_id
+        WHERE LOWER(p.name) NOT IN ({placeholders}) 
+          AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
+        GROUP BY LOWER(p.name)
+    ''', list(EXCLUDED_PLAYERS) + [ch_id, ch_id])
+    all_players_raw = c.fetchall()
+    conn.close()
 
     if not all_players_raw:
         await update.message.reply_text(f"دیتابیس کانال **{ch_name}** هنوز داده‌ای ندارد.", parse_mode="Markdown", reply_markup=get_main_keyboard())
@@ -1270,7 +1254,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با موتور ضد تکرار سه‌لایه و پاکسازی سوابق فعال شد...")
+    print("ربات با معماری ضد قفل (Deadlock-Free) و پشتیبانی از انواع فرمت‌های ایونت فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
