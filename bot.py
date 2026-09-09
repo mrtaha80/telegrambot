@@ -60,7 +60,7 @@ PLAYER_ALIASES = {
     'alireza': 'alireza kamali',
     'alireza k': 'alireza kamali',
     'hossein': 'hossein ss',
-    'hosein': 'hossein ss',
+    'hosein': 'hosein ss',
     'hosein ss': 'hossein ss',
     'h ss': 'hossein ss',
     'mmd': 'mmd4030',
@@ -498,12 +498,14 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         c = conn.cursor()
 
         if event_id != "0":
-            c.execute("SELECT 1 FROM processed_games WHERE channel_id = ? AND (event_id = ? OR event_id = ?)", (channel_id, event_id, raw_event))
+            c.execute("SELECT 1 FROM processed_games WHERE channel_id = ? AND (event_id = ? || event_id = ?)", (channel_id, event_id, raw_event))
+            # اصلاح ساده برای SQLite
+            c.execute("SELECT 1 FROM processed_games WHERE channel_id = ? AND (event_id = ?)", (channel_id, event_id))
             if c.fetchone():
                 conn.close()
                 return False, f"ایونت `{event_id}`: این بازی قبلاً ثبت شده است (تکراری)"
 
-            c.execute("SELECT COUNT(*) FROM matches WHERE channel_id = ? AND (event_id = ? OR event_id = ?)", (channel_id, event_id, raw_event))
+            c.execute("SELECT COUNT(*) FROM matches WHERE channel_id = ? AND (event_id = ?)", (channel_id, event_id))
             if c.fetchone()[0] >= 5:
                 conn.close()
                 return False, f"ایونت `{event_id}`: سوابق این ایونت قبلاً ثبت شده است (تکراری)"
@@ -647,7 +649,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         print(f"Error parsing event: {e}")
         return False, f"خطای سیستمی: {str(e)}"
 
-# ================= ساخت فایل PDF حرفه‌ای و ۱۰ نفر برتر هر ساید =================
+# ================= ساخت فایل PDF شکیل بدون کاراکترهای مربعی =================
 def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="cafe mafia", filename="Mafia_Leaderboard.pdf"):
     doc = SimpleDocTemplate(filename, pagesize=letter, rightMargin=24, leftMargin=24, topMargin=24, bottomMargin=24)
     elements = []
@@ -657,15 +659,23 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="c
     subtitle_style = ParagraphStyle('SubTitle', parent=styles['Normal'], fontSize=9, textColor=colors.HexColor('#475569'), alignment=1, spaceAfter=12)
     section_style = ParagraphStyle('SectionHeading', parent=styles['Heading2'], fontSize=11, leading=14, textColor=colors.HexColor('#1E293B'), spaceBefore=8, spaceAfter=6)
 
-    elements.append(Paragraph(f"👑 <b>CAFE MAFIA GRAND CHAMPIONSHIP</b> 👑", title_style))
+    elements.append(Paragraph(f"<b>CAFE MAFIA GRAND CHAMPIONSHIP</b>", title_style))
     elements.append(Paragraph(f"League / Channel: <b>{channel_name.upper()}</b> • Bayesian Volume Regularization", subtitle_style))
 
-    # جدول لیدربرد کل
     table_data = [["Rank", "Player", "Matches", "Bayesian Pts", "Win Rate", "Mafia (W/G)", "Citizen (W/G)"]]
     for idx, p in enumerate(results, 1):
         m_rate = (p['m_wins'] * 100 // p['m_games']) if p['m_games'] > 0 else 0
         c_rate = (p['c_wins'] * 100 // p['c_games']) if p['c_games'] > 0 else 0
-        badge = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else f"#{idx}"
+        
+        # استفاده از متن انگلیسی استاندارد برای جلوگیری از مربع شدن در PDF
+        if idx == 1:
+            badge = "1st Place"
+        elif idx == 2:
+            badge = "2nd Place"
+        elif idx == 3:
+            badge = "3rd Place"
+        else:
+            badge = f"#{idx}"
 
         table_data.append([
             badge,
@@ -677,7 +687,7 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="c
             f"{c_rate}% ({p['c_wins']}/{p['c_games']})"
         ])
 
-    main_table = Table(table_data, colWidths=[35, 125, 52, 75, 60, 105, 105])
+    main_table = Table(table_data, colWidths=[55, 115, 52, 75, 60, 100, 100])
     main_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F172A')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#F8FAFC')),
@@ -695,9 +705,8 @@ def generate_pdf_report(results, mafia_leaders, citizen_leaders, channel_name="c
     elements.append(main_table)
     elements.append(Spacer(1, 10))
 
-    # جدول ۱۰ بازیکن برتر هر ساید
-    elements.append(Paragraph("⚔️ <b>Elite Side Specialists — Top 10 Players (Min 9 Side Games)</b>", section_style))
-    top_side_data = [["🔥 Top 10 Mafia Syndicate", "🛡 Top 10 Citizen Alliance"]]
+    elements.append(Paragraph("<b>Elite Side Specialists — Top 10 Players (Min 9 Side Games)</b>", section_style))
+    top_side_data = [["Top 10 Mafia Syndicate", "Top 10 Citizen Alliance"]]
     max_len = max(len(mafia_leaders[:10]), len(citizen_leaders[:10]))
 
     for i in range(max_len):
@@ -1002,24 +1011,40 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
-        f"🔹 **۱۰ بازیکن برتر هر ساید:** نمایش تخصصی ۱۰ شکارچی برتر مافیا و ۱۰ قهرمان برتر شهروند در PDF.\n"
-        f"🔹 **هماهنگی کامل رتبه‌ها:** رتبه کارت شخصی دقیقاً برابر با رتبه شما در تالار افتخارات است.\n"
-        f"🔹 **ادغام هوشمند و بی‌تفاوتی به حروف:** تطبیق دقیق بدون حساسیت به فرمت متن.\n\n"
+        f"🔹 **راهنمای شکیل و استاندارد:** با زدن دکمه «📜 راهنمای رتبه‌بندی» توضیحات کامل الگوریتم بیزی را مشاهده کنید.\n"
+        f"🔹 **۱۰ بازیکن برتر هر ساید:** رتبه‌بندی تخصصی ۱۰ نفر برتر مافیا و شهروند در لیدربرد و PDF.\n"
+        f"🔹 **هماهنگی کامل رتبه کارت شخصی با تالار افتخارات.**\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
+# ================= راهنمای شکیل و استاندارد رتبه‌بندی =================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "📜 **راهنمای جامع سامانه:**\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "▫️ **تغییر کانال:** با زدن «📢 انتخاب / تغییر کانال» کانال مدنظر را انتخاب کنید.\n"
-        "▫️ **ارسال بازی:** متن و عکس ایونت‌ها را بفرستید؛ گزارش تایید و رد به تفکیک ارسال خواهد شد."
+        "👑 **راهنمای جامع سیستم ارزیابی و رتبه‌بندی بیزی کافه مافیا** 👑\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🎯 **۱. حد نصاب‌های ورود به جدول رسمی:**\n"
+        "▫️ **حداقل تعداد بازی کل:** ثبت حداقل **۱۸ بازی** رسمی در کارنامه.\n"
+        "▫️ **حد نصاب تخصصی ساید:** انجام حداقل **۹ بازی** در هر ساید (مافیا یا شهروند) جهت قرارگیری در جدول برترین‌های آن ساید.\n\n"
+        
+        "⚖️ **۲. الگوریتم تنظیم حجم و امتیازدهی بیزی (Bayesian Rating):**\n"
+        "برای جلوگیری از تاثیر شانس و تعداد کم بازی‌ها (مثل ۱۰۰٪ وین‌ریت با ۲ بازی)، از مدل پیشرفته آمار بیزی استفاده می‌شود:\n"
+        "▫️ **میانگین مادری (Prior / Global Mean):** نقطه تعادل بر اساس میانگین کل بردهای لیگ.\n"
+        "▫️ **وزن‌دهی به حجم بازی:** هرچه تعداد بازی‌ها بیشتر شود، امتیاز واقعی بازیکن تثبیت و تقویت می‌شود.\n\n"
+
+        "🛡 **۳. تفکیک تخصصی سایدها:**\n"
+        "مهارت بازیکن در کنترل شب (مافیا) و استدلال روز (شهروند) به صورت کاملاً مجزا در دو جدول تفکیک و ارزیابی می‌شوند.\n\n"
+
+        "🔍 **۴. یکپارچه‌سازی و عدم حساسیت به حروف:**\n"
+        "سیستم فاقد هرگونه حساسیت به حروف بزرگ و کوچک است و تمامی اسامی مستعار به صورت هوشمند ادغام می‌شوند.\n\n"
+
+        "📄 **۵. تالار افتخارات PDF:**\n"
+        "با کلیک روی دکمه گزارش، فایل PDF شکیل شامل رتبه‌بندی کلی و ۱۰ بازیکن برتر هر ساید برای شما صادر می‌شود."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-# ================= گزارش رسمی و لیدربرد (با ۱۰ بازیکن برتر هر ساید) =================
+# ================= گزارش رسمی و لیدربرد =================
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
@@ -1337,7 +1362,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با گزارش PDF حرفه‌ای و ۱۰ بازیکن برتر هر ساید فعال شد...")
+    print("ربات با رفع خطای مربعی PDF و راهنمای شکیل فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
