@@ -99,7 +99,8 @@ def resolve_player_name(raw_name):
     if name in PLAYER_ALIASES:
         return PLAYER_ALIASES[name]
 
-    if re.search(r'qaderi|ghaderi', name):
+    # تطبیق هوشمند پیشرفته: اگر کلمه قادری یا ghaderi در هر جای نام مرکب (مثل m h qaderi) بود
+    if re.search(r'\b(qaderi|ghaderi)\b', name) or 'قادری' in name:
         return 'qaderi'
 
     if re.search(r'^(mmd|moham+ad|mam+ad)(\s*4030)?$', name):
@@ -114,7 +115,7 @@ def resolve_player_name(raw_name):
     if fuzz.ratio(name, 'ebrahim') >= 85 or fuzz.ratio(name, 'ebi') >= 90:
         return 'ebi'
 
-    if fuzz.ratio(name, 'qaderi') >= 80 or fuzz.ratio(name, 'ghaderi') >= 80:
+    if 'qaderi' in name or 'ghaderi' in name or fuzz.partial_ratio(name, 'qaderi') >= 80 or fuzz.partial_ratio(name, 'ghaderi') >= 80:
         return 'qaderi'
 
     return name
@@ -328,6 +329,22 @@ def merge_player_accounts(cursor):
         'qaderi': ['ghaderi']
     }
 
+    # به طور خودکار هر رکورد دیتابیسی که شامل qaderi یا ghaderi باشد را با qaderi یکی کن
+    cursor.execute("SELECT id, name FROM players WHERE LOWER(name) LIKE '%qaderi%' OR LOWER(name) LIKE '%ghaderi%'")
+    qaderi_matches = cursor.fetchall()
+    
+    cursor.execute("INSERT OR IGNORE INTO players (name) VALUES ('qaderi')")
+    cursor.execute("SELECT id FROM players WHERE name = 'qaderi'")
+    target_row = cursor.fetchone()
+    if target_row:
+        target_id = target_row[0]
+        for pid, pname in qaderi_matches:
+            if pid != target_id:
+                cursor.execute("UPDATE OR IGNORE matches SET player_id = ? WHERE player_id = ?", (target_id, pid))
+                cursor.execute("DELETE FROM matches WHERE player_id = ?", (pid,))
+                cursor.execute("UPDATE user_linked_players SET player_name = 'qaderi' WHERE LOWER(player_name) = ?", (pname.lower(),))
+                cursor.execute("DELETE FROM players WHERE id = ?", (pid,))
+
     for target_name, aliases in merges.items():
         cursor.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (target_name.lower(),))
         cursor.execute("SELECT id FROM players WHERE LOWER(name) = ?", (target_name.lower(),))
@@ -487,7 +504,7 @@ def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1)
         event_id = clean_event_id(raw_event)
         raw_scenario = scenario_match.group(1).strip() if scenario_match else ""
 
-        win_block_match = re.search(r'(?:winner|win|برنده|برد)\s*[:•\-_ ]*([\s\S]*?)(?:mvp|☆|★|✦|━|─|$)', norm, re.IGNORECASE)
+        win_block_match = re.search(r'(?:winner|win|برنده|برد)\s*[:#•\-_ ]*([\s\S]*?)(?:mvp|☆|★|✦|━|─|$)', norm, re.IGNORECASE)
         if not win_block_match:
             return False, f"ایونت `{event_id}`: سطر برنده بازی پیدا نشد"
 
@@ -1017,9 +1034,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
-        f"🔹 **راهنمای شکیل و استاندارد:** با زدن دکمه «📜 راهنمای رتبه‌بندی» توضیحات کامل الگوریتم بیزی را مشاهده کنید.\n"
+        f"🔹 **هوش مصنوعی تطبیق اسامی:** شناسایی پیشرفته نام‌های مرکب (مثل M H Qaderi) و ادغام با Qaderi.\n"
         f"🔹 **۱۰ بازیکن برتر هر ساید:** رتبه‌بندی تخصصی ۱۰ نفر برتر مافیا و شهروند در لیدربرد و PDF.\n"
-        f"🔹 **ادغام هوشمند اسامی:** داده‌های Qaderi/Ghaderi، Ebrahim و... با حساب اصلی خود یکپارچه شده‌اند.\n\n"
+        f"🔹 **هماهنگی کامل رتبه کارت شخصی با تالار افتخارات.**\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -1042,8 +1059,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛡 **۳. تفکیک تخصصی سایدها:**\n"
         "مهارت بازیکن در کنترل شب (مافیا) و استدلال روز (شهروند) به صورت کاملاً مجزا در دو جدول تفکیک و ارزیابی می‌شوند.\n\n"
 
-        "🔍 **۴. یکپارچه‌سازی و عدم حساسیت به حروف:**\n"
-        "سیستم فاقد هرگونه حساسیت به حروف بزرگ و کوچک است و تمامی اسامی مستعار (مانند Qaderi و Ghaderi) به صورت هوشمند ادغام می‌شوند.\n\n"
+        "🔍 **۴. تطبیق هوشمند نام‌های مرکب:**\n"
+        "سیستم تمامی نام‌های مشابه یا مرکب (مانند M H Qaderi) را به صورت خودکار زیرمجموعه هویت اصلی (Qaderi) ثبت و ادغام می‌کند.\n\n"
 
         "📄 **۵. تالار افتخارات PDF:**\n"
         "با کلیک روی دکمه گزارش، فایل PDF شکیل و استاندارد (بدون کاراکترهای مربعی شکل) شامل رتبه‌بندی کلی و ۱۰ بازیکن برتر هر ساید برای شما صادر می‌شود."
@@ -1368,7 +1385,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات با ادغام Qaderi، اصلاح PDF و راهنمای شکیل فعال شد...")
+    print("ربات با ادغام پیشرفته نام‌های مرکب Qaderi فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
