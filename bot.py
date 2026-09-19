@@ -49,7 +49,8 @@ LINK_PROFILE_STATE = 2
 ADD_CHANNEL_STATE = 3
 
 SEAT_SYMBOLS = "➊➋➌➍➎➏➐➑➒➓❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯"
-HIDDEN_PLAYERS = {'ali', 'sara', 'god', 'گاد', 'hasan', 'azar', 'saeid a', 'amir', 'ana', 'zahra'}
+# اضافه شدن nima به همراه سایر اسامی پنهان‌آماری
+HIDDEN_PLAYERS = {'ali', 'sara', 'god', 'گاد', 'hasan', 'azar', 'saeid a', 'amir', 'ana', 'zahra', 'nima'}
 
 PLAYER_ALIASES = {
     'mohammad a': 'omid',
@@ -60,7 +61,7 @@ PLAYER_ALIASES = {
     'alireza': 'alireza kamali',
     'alireza k': 'alireza kamali',
     'hossein': 'hossein ss',
-    'hosein': 'hossein ss',
+    'hosein': 'hosein ss',
     'hosein ss': 'hossein ss',
     'h ss': 'hossein ss',
     'mmd': 'mmd4030',
@@ -496,6 +497,72 @@ def get_or_create_player(cursor, raw_name):
     row = cursor.fetchone()
     return row[0], clean_name
 
+# ================= تابع ساخت متن خلاصه کوچک کانال =================
+def generate_mini_channel_summary(channel_id, channel_name):
+    conn = sqlite3.connect('mafia_stats.db', timeout=60.0)
+    c = conn.cursor()
+
+    placeholders = ','.join(['?'] * len(HIDDEN_PLAYERS))
+    c.execute(f'''
+        SELECT AVG(is_win) FROM matches m
+        JOIN players p ON p.id = m.player_id
+        WHERE LOWER(p.name) NOT IN ({placeholders}) 
+          AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
+    ''', [hp.lower() for hp in HIDDEN_PLAYERS] + [channel_id, channel_id])
+    g_avg = c.fetchone()[0] or 0.50
+
+    c.execute(f'''
+        SELECT 
+            LOWER(p.name),
+            COUNT(m.id) as total_games,
+            SUM(CASE WHEN m.is_win = 1 THEN 1 ELSE 0 END) as total_wins
+        FROM players p
+        JOIN matches m ON p.id = m.player_id
+        WHERE LOWER(p.name) NOT IN ({placeholders}) 
+          AND (m.channel_id = ? OR (? = 1 AND m.channel_id IS NULL))
+        GROUP BY LOWER(p.name)
+    ''', [hp.lower() for hp in HIDDEN_PLAYERS] + [channel_id, channel_id])
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        return f"📌 **خلاصه وضعیت لیگ {channel_name}:**\nهنوز داده کافی ثبت نشده است."
+
+    C_GLOBAL = 12.0
+    VOLUME_POWER = 0.18
+
+    calculated = []
+    for row in rows:
+        name, tg, tw = row
+        base_b = ((tw + (C_GLOBAL * g_avg)) / (tg + C_GLOBAL)) * 100.0
+        vol_boost = 1.0 + (VOLUME_POWER * math.log10((tg / 18.0) + 1.0)) if tg >= 18 else 1.0
+        bayes_score = base_b * vol_boost
+        calculated.append({
+            'name': name.title(),
+            'games': tg,
+            'bayes': bayes_score
+        })
+
+    # بیشترین بازی‌ها
+    top_games = sorted(calculated, key=lambda x: x['games'], reverse=True)[:3]
+    # بهترین نمرات بیزی
+    top_bayes = sorted(calculated, key=lambda x: x['bayes'], reverse=True)[:3]
+
+    summary = f"📊 **خلاصه آنی وضعیت کانال ({channel_name})**\n"
+    summary += "━━━━━━━━━━━━━━━━━━━━━━\n"
+    
+    summary += "🔥 **بیشترین بازی‌ها:**\n"
+    for i, p in enumerate(top_games, 1):
+        summary += f"{i}. `{p['name']}` ⟵ `{p['games']}` بازی\n"
+
+    summary += "\n⭐ **بهترین امتیازات (بیزی):**\n"
+    for i, p in enumerate(top_bayes, 1):
+        summary += f"{i}. `{p['name']}` ⟵ امتیاز: `{p['bayes']:.2f}`\n"
+    
+    summary += "━━━━━━━━━━━━━━━━━━━━━━\n"
+    summary += "⚡️ آپدیت‌شده توسط ربات تحلیل کافه مافیا"
+    return summary
+
 # ================= پارسر فوق‌پیشرفته و هوشمند ثبت داده بازی =================
 def process_game_data(raw_text, image_bytes=None, fallback_id="0", channel_id=1):
     try:
@@ -824,7 +891,13 @@ async def flush_batch_worker(chat_id, context: ContextTypes.DEFAULT_TYPE):
             for reason in rejected_reasons:
                 summary_text += f"• {reason}\n"
 
+        # ارسال خلاصه نتایج پردازش
         await send_large_text(chat_id, summary_text, context)
+
+        # ارسال پیام خلاصه و کوچک همیشه در آخرین بخش (مناسب برای کانال)
+        if added > 0:
+            mini_summary = generate_mini_channel_summary(ch_id, ch_name)
+            await send_large_text(chat_id, mini_summary, context)
 
     finally:
         IS_PROCESSING.discard(chat_id)
@@ -1000,9 +1073,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📍 کانال فعال شما: **{ch_name}**\n\n"
         f"🌟 **ویژگی‌های سامانه:**\n\n"
-        f"🔹 **نمایش ۳ بازیکن برتر دارای بیشترین کیک:** محاسبه و نمایش خودکار بیشترین تعداد کلمه/ایموجی کیک در گزارش‌ها.\n"
+        f"🔹 **ارسال خلاصه کوچک در انتهای پیام‌ها:** نمایش خودکار وضعیت برترین‌ها و بیشترین بازی‌ها در انتهای پردازش.\n"
         f"🔹 **تفکیک صریح Ana و Hana:** استقلال کامل آمار دو بازیکن.\n"
-        f"🔹 **مخفی‌سازی هوشمند Amir، Zahra و Ana:** عدم نمایش داده‌های آماری اسامی خاص بدون حذف فیزیکی.\n\n"
+        f"🔹 **مخفی‌سازی هوشمند Nima، Amir و سایر موارد:** عدم نمایش داده‌های آماری اسامی خاص بدون حذف فیزیکی.\n\n"
         f"⚖️ **حد نصاب:** حداقل ۱۸ بازی کل | حداقل ۹ بازی در هر ساید.\n\n"
         f"👇 *جهت شروع، از دکمه‌های زیر استفاده کنید:* "
     )
@@ -1018,22 +1091,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "▫️ **حد نصاب تخصصی ساید:** انجام حداقل **۹ بازی** در هر ساید (مافیا یا شهروند) جهت قرارگیری در جدول برترین‌های آن ساید.\n\n"
         
         "⚖️ **۲. الگوریتم تنظیم حجم و امتیازدهی بیزی (Bayesian Rating):**\n"
-        "برای جلوگیری از تاثیر شانس و تعداد کم بازی‌ها ( مثل ۱۰۰٪ وین‌ریت با ۲ بازی)، از مدل پیشرفته آمار بیزی استفاده می‌شود:\n"
-        "▫️ **میانگین مادری (Prior / Global Mean):** نقطه تعادل بر اساس میانگین کل بردهای لیگ.\n"
-        "▫️ **وزن‌دهی به حجم بازی:** هرچه تعداد بازی‌ها بیشتر شود، امتیاز واقعی بازیکن تثبیت و تقویت می‌شود.\n\n"
+        "برای جلوگیری از تاثیر شانس و تعداد کم بازی‌ها، از مدل پیشرفته آمار بیزی استفاده می‌شود.\n\n"
 
-        "🛡 **۳. تفکیک تخصصی سایدها:**\n"
-        "مهارت بازیکن در کنترل شب (مافیا) و استدلال روز (شهروند) به صورت کاملاً مجزا در دو جدول تفکیک و ارزیابی می‌شوند.\n\n"
+        "📌 **۳. خلاصه خودکار کانال:**\n"
+        "پس از بررسی و ثبت بازی‌ها، یک گزارش کوچک و خلاصه شامل بیشترین تعداد بازی‌ها و بهترین نمرات در انتهای پیام‌ها ارسال می‌شود.\n\n"
 
-        "🍰 **۴. بخش برترین‌های کیک:**\n"
-        "در انتهای تالار افتخارات، ۳ نفری که بیشترین کلمه یا ایموجی «کیک» در کنار نامشان ثبت شده است به نمایش درمی‌آید.\n\n"
-
-        "📄 **۵. تالار افتخارات PDF:**\n"
-        "با کلیک روی دکمه گزارش، فایل PDF شکیل و استاندارد (بدون کاراکترهای مربعی شکل) شامل رتبه‌بندی کلی و ۱۰ بازیکن برتر هر ساید برای شما صادر می‌شود."
+        "📄 **۴. تالار افتخارات PDF:**\n"
+        "با کلیک روی دکمه گزارش، فایل PDF شکیل و استاندارد شامل رتبه‌بندی کلی و ۱۰ بازیکن برتر هر ساید صادر می‌شود."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-# ================= گزارش رسمی و لیدربرد امن (بدون کرش و با پنهان‌سازی هوشمند) =================
+# ================= گزارش رسمی و لیدربرد امن =================
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
@@ -1076,38 +1144,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             HAVING total_games >= 18
         ''', [hp.lower() for hp in HIDDEN_PLAYERS] + [ch_id, ch_id])
         rows = c.fetchall()
-
-        # استخراج متن‌های ذخیره‌شده بازی‌ها برای شمارش کلمه «کیک» یا ایموجی آن
-        c.execute("SELECT raw_text FROM processed_games WHERE channel_id = ? OR channel_id IS NULL", (ch_id,))
-        game_texts = c.fetchall()
         conn.close()
-
-        # شمارش تعداد «کیک» برای هر بازیکن از روی متن ایونت‌ها و اسامی
-        cake_counts = {}
-        for row in rows:
-            name = row[0]
-            cake_counts[name] = 0
-
-        for text_tuple in game_texts:
-            t = text_tuple[0]
-            if not t:
-                continue
-            t_lower = t.lower()
-            # شمارش تعداد تکرار کلمه کیک یا ایموجی آن در متن بازی‌ها به همراه نام بازیکنان
-            for name in cake_counts.keys():
-                if name in t_lower:
-                    # بررسی اینکه در آن خط یا اطراف اسم کلمه کیک یا 🍰 وجود دارد یا خیر
-                    pattern = rf'{name}[^\n]*?(کیک|🍰)|(کیک|🍰)[^\n]*?{name}'
-                    matches = re.findall(pattern, t_lower)
-                    if matches:
-                        cake_counts[name] += len(matches)
-                    elif 'کیک' in t_lower or '🍰' in t_lower:
-                        # اگر کلی‌تر در متن بازی تکرار شده باشد
-                        pass
-
-        # مرتب‌سازی بازیکنان بر اساس بیشترین تعداد کیک
-        sorted_cake_players = sorted(cake_counts.items(), key=lambda x: x[1], reverse=True)
-        top_cakes = [item for item in sorted_cake_players if item[1] > 0][:3]
 
         if not rows:
             await update.message.reply_text(
@@ -1216,15 +1253,6 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 report += f"{shields[r-1]} {r}. **{c_item['name'].title()}** ⟵ نمره: `{c_item['bayes']:.2f}` (برد: `{c_item['rate']}%` در `{c_item['games']}` بازی)\n"
         else:
             report += "بازیکنی با حداقل ۹ بازی شهروندی یافت نشد.\n"
-
-        # اضافه کردن بخش ۳ نفر اول دارای بیشترین کیک
-        report += "\n🍰 **۳ بازیکن برتر دارای بیشترین کیک:**\n"
-        if top_cakes:
-            cake_medals = ["🥇", "🥈", "🥉"]
-            for idx, (c_name, c_count) in enumerate(top_cakes):
-                report += f"{cake_medals[idx]} **{c_name.title()}** ⟵ تعداد: `{c_count}` کیک\n"
-        else:
-            report += "موردی با کلمه کیک ثبت نشده است.\n"
 
         await send_large_text(update, report, context)
 
@@ -1396,7 +1424,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ================= اجرای برنامه =================
 if __name__ == '__main__':
     init_db()
-    print("ربات همراه با بخش نمایش ۳ بازیکن برتر کیک‌خورده فعال شد...")
+    print("ربات با امکان ارسال پیام خلاصه کوچک در کانال و ایزوله سازی Nima فعال شد...")
 
     custom_request = HTTPXRequest(
         connection_pool_size=100,
